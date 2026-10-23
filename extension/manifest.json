@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "UI 自动化录制器",
+  "version": "1.0.0",
+  "description": "录制浏览器操作，自动生成可回放的测试步骤与稳定元素定位（确定性 data-uitest-id + 多级兜底），供 UI 自动化测试平台使用。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8490/*",
+    "http://localhost:8490/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "UI 自动化录制器",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "uitest-keys.js",
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

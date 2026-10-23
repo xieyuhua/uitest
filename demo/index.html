@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>示例被测后台 · 商品与活动</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", system-ui, sans-serif; background: #f5f6fa; color: #1f2430; font-size: 14px; }
+  header { height: 56px; background: #fff; border-bottom: 1px solid #e6e8ef; display: flex; align-items: center; padding: 0 20px; gap: 16px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .badge { font-size: 12px; color: #4f46e5; background: #eef2ff; padding: 3px 8px; border-radius: 999px; }
+  .layout { display: flex; min-height: calc(100vh - 56px); }
+  nav { width: 190px; background: #fff; border-right: 1px solid #e6e8ef; padding: 14px 10px; }
+  nav a { display: block; padding: 9px 12px; border-radius: 8px; color: #4b5563; text-decoration: none; margin-bottom: 4px; }
+  nav a.active { background: #eef2ff; color: #4f46e5; font-weight: 600; }
+  main { flex: 1; padding: 20px; }
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.06); padding: 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 14px; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid transparent; padding: 8px 14px; }
+  .btn-primary { background: #4f46e5; color: #fff; }
+  .btn-ghost { background: #fff; border-color: #d6d9e3; color: #374151; }
+  .btn-danger { background: #fee2e2; color: #b91c1c; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #eef0f5; }
+  th { color: #6b7280; font-weight: 500; background: #fafbfe; }
+  .form-item { margin-bottom: 14px; display: flex; align-items: flex-start; }
+  .form-item > label { width: 110px; text-align: right; padding-right: 12px; padding-top: 8px; color: #374151; flex: none; }
+  .form-item .ctrl { flex: 1; max-width: 460px; }
+  input[type=text], input[type=number], input[type=date], input[type=datetime-local], select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #d6d9e3; border-radius: 8px; font: inherit; background: #fff;
+  }
+  textarea { min-height: 72px; resize: vertical; }
+  .hint { color: #9aa1b1; font-size: 12px; margin-top: 4px; }
+  .actions { padding-left: 110px; display: flex; gap: 10px; }
+  .toast { position: fixed; right: 20px; bottom: 20px; background: #16a34a; color: #fff; padding: 10px 16px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); opacity: 0; transform: translateY(8px); transition: .2s; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .tag { background: #eff6ff; color: #1d4ed8; border-radius: 6px; padding: 2px 6px; font-size: 12px; }
+  .hidden { display: none !important; }
+  .muted { color: #9aa1b1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>示例被测后台</h1>
+  <span class="badge">UI 自动化演练用 · 无真实后端</span>
+</header>
+
+<div class="layout">
+  <nav>
+    <a href="#products" id="nav-products" class="active">商品管理</a>
+    <a href="#activities" id="nav-activities">活动管理</a>
+  </nav>
+
+  <main>
+    <!-- ============================ 商品 ============================ -->
+    <section id="page-products">
+      <div class="card">
+        <div class="toolbar">
+          <h2>服务商品列表</h2>
+          <div>
+            <button class="btn-primary" id="btn-new-product" type="button">新建商品</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr><th style="width:60px">ID</th><th>商品名称</th><th style="width:100px">价格</th><th style="width:80px">库存</th><th style="width:100px">分类</th><th style="width:100px">操作</th></tr>
+          </thead>
+          <tbody id="product-rows">
+            <tr><td>1001</td><td>标准版服务</td><td>199.00</td><td>120</td><td>服务类</td><td><span class="tag">已上架</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card hidden" id="product-form-card">
+        <div class="toolbar"><h2>新建服务商品</h2></div>
+        <form id="product-form" autocomplete="off">
+          <div class="form-item">
+            <label for="product-name">商品名称</label>
+            <div class="ctrl">
+              <input type="text" id="product-name" name="product_name" placeholder="请输入商品名称" />
+              <div class="hint">2-40 个字符，同名校验不通过会提示</div>
+            </div>
+          </div>
+          <div class="form-item">
+            <label for="product-price">价格</label>
+            <div class="ctrl"><input type="number" id="product-price" name="price" step="0.01" placeholder="请输入价格" /></div>
+          </div>
+          <div class="form-item">
+            <label for="product-stock">库存</label>
+            <div class="ctrl"><input type="number" id="product-stock" name="stock" placeholder="请输入库存数量" /></div>
+          </div>
+          <div class="form-item">
+            <label for="product-category">商品分类</label>
+            <div class="ctrl">
+              <select id="product-category" name="category">
+                <option value="">请选择分类</option>
+                <option value="service">服务类</option>
+                <option value="goods">实物类</option>
+                <option value="virtual">虚拟类</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-item">
+            <label for="product-online-date">上架日期</label>
+            <div class="ctrl"><input type="date" id="product-online-date" name="online_date" /></div>
+          </div>
+          <div class="form-item">
+            <label for="product-desc">商品描述</label>
+            <div class="ctrl"><textarea id="product-desc" name="description" placeholder="请输入商品描述"></textarea></div>
+          </div>
+          <div class="form-item">
+            <label for="product-cover">封面图片</label>
+            <div class="ctrl"><input type="file" id="product-cover" name="cover" accept="image/*" /></div>
+          </div>
+          <div class="form-item">
+            <label>立即上架</label>
+            <div class="ctrl"><label><input type="checkbox" id="product-online" name="online" /> 保存后自动上架</label></div>
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn-primary" id="btn-save-product">保存商品</button>
+            <button type="button" class="btn-ghost" id="btn-cancel-product">取消</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ============================ 活动 ============================ -->
+    <section id="page-activities" class="hidden">
+      <div class="card">
+        <div class="toolbar"><h2>活动设置</h2><span class="muted">示例：设置秒杀 / 满减活动</span></div>
+        <form id="activity-form" autocomplete="off">
+          <div class="form-item">
+            <label for="activity-name">活动名称</label>
+            <div class="ctrl"><input type="text" id="activity-name" name="activity_name" placeholder="请输入活动名称" /></div>
+          </div>
+          <div class="form-item">
+            <label for="activity-type">活动类型</label>
+            <div class="ctrl">
+              <select id="activity-type" name="activity_type">
+                <option value="">请选择活动类型</option>
+                <option value="seckill">限时秒杀</option>
+                <option value="discount">满减折扣</option>
+                <option value="gift">满赠</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-item">
+            <label for="activity-start">开始时间</label>
+            <div class="ctrl"><input type="datetime-local" id="activity-start" name="start_at" /></div>
+          </div>
+          <div class="form-item">
+            <label for="activity-discount">折扣</label>
+            <div class="ctrl"><input type="number" id="activity-discount" name="discount" step="0.1" placeholder="例如 8.5 表示 8.5 折" /></div>
+          </div>
+          <div class="form-item">
+            <label>可叠加优惠券</label>
+            <div class="ctrl"><label><input type="checkbox" id="activity-stack" name="stackable" /> 允许与优惠券叠加</label></div>
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn-primary" id="btn-save-activity">保存活动</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>已设置的活动</h2>
+        <table>
+          <thead><tr><th style="width:60px">ID</th><th>活动名称</th><th style="width:120px">类型</th><th style="width:100px">折扣</th><th style="width:120px">状态</th></tr></thead>
+          <tbody id="activity-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var seq = 1002, aseq = 1;
+
+  function $(id) { return document.getElementById(id); }
+
+  function toast(msg, color) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.style.background = color || '#16a34a';
+    t.classList.add('show');
+    setTimeout(function () { t.classList.remove('show'); }, 2200);
+  }
+
+  // 顶部导航切换
+  function showPage(name) {
+    $('page-products').classList.toggle('hidden', name !== 'products');
+    $('page-activities').classList.toggle('hidden', name !== 'activities');
+    $('nav-products').classList.toggle('active', name === 'products');
+    $('nav-activities').classList.toggle('active', name === 'activities');
+  }
+  $('nav-products').addEventListener('click', function () { showPage('products'); });
+  $('nav-activities').addEventListener('click', function () { showPage('activities'); });
+
+  // 打开 / 关闭新建商品表单
+  $('btn-new-product').addEventListener('click', function () {
+    $('product-form-card').classList.remove('hidden');
+  });
+  $('btn-cancel-product').addEventListener('click', function () {
+    $('product-form-card').classList.add('hidden');
+  });
+
+  // 保存商品
+  $('product-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = $('product-name').value.trim();
+    if (!name) { toast('商品名称不能为空', '#dc2626'); return; }
+    var price = $('product-price').value || '0.00';
+    var stock = $('product-stock').value || '0';
+    var catSel = $('product-category');
+    var catText = catSel.value ? catSel.options[catSel.selectedIndex].text : '未分类';
+
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + (seq++) + '</td><td>' + name + '</td><td>' + price +
+      '</td><td>' + stock + '</td><td>' + catText + '</td><td><span class="tag">已上架</span></td>';
+    $('product-rows').insertBefore(tr, $('product-rows').firstChild);
+    $('product-form').reset();
+    $('product-form-card').classList.add('hidden');
+    toast('商品创建成功：' + name);
+    document.title = '商品创建成功 - ' + name;
+  });
+
+  // 保存活动
+  $('activity-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = $('activity-name').value.trim();
+    if (!name) { toast('活动名称不能为空', '#dc2626'); return; }
+    var typeSel = $('activity-type');
+    var typeText = typeSel.value ? typeSel.options[typeSel.selectedIndex].text : '未设置';
+    var discount = $('activity-discount').value || '-';
+
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + (aseq++) + '</td><td>' + name + '</td><td>' + typeText +
+      '</td><td>' + discount + '</td><td><span class="tag">进行中</span></td>';
+    $('activity-rows').insertBefore(tr, $('activity-rows').firstChild);
+    toast('活动已保存：' + name);
+    $('save-result-marker') || (function () {
+      var d = document.createElement('div');
+      d.id = 'save-result-marker';
+      d.className = 'hidden';
+      d.textContent = '活动保存成功标记';
+      document.body.appendChild(d);
+    })();
+  });
+})();
+</script>
+</body>
+</html>

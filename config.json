@@ -1,0 +1,22 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8490
+  },
+  "storage": {
+    "dir": "data",
+    "keep_runs": 200
+  },
+  "browser": {
+    "executable": "",
+    "headless": false, "no_sandbox": false, "debug_url": "", "kernel_dir": "", "extra_args": [],
+    "step_delay_ms": 260,
+    "action_timeout_ms": 15000
+  },
+  "ai": {
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "timeout_sec": 60
+  }
+}

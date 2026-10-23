@@ -1,0 +1,37 @@
+0:08:59 Browser1 Switch from Tab1 to Tab5 at 3
+0:08:59 SwitchTab_Click
+0:08:59 Browser1 Switch from Tab5 to Tab6 at 4
+0:08:59 SwitchTab_Click
+0:09:02 Widget Closed: MenuHost
+0:09:02 Tab7 StartNav36 #reload
+0:09:02 Browser1 Insert active Tab7 at 5
+0:09:02 Tab7 FinishNav36
+0:09:02 Tab7 PageLoad
+0:09:07 CloseTab_NoAlertIndicator
+0:09:07 Microsoft.Shutdown.TabStripModel.CloseTabs
+0:09:07 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl
+0:09:07 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_TabClosable
+0:09:07 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_NotClosingAll
+0:09:07 Microsoft.Shutdown.TabStripModel.CloseWebContentses
+0:09:07 Microsoft.Shutdown.TabStripModel.CloseWebContentses_FastShutdown
+0:09:08 Tab7 RenderProcessGone
+0:09:08 Microsoft.Shutdown.TabStripModel.RunUnloadListenerBeforeClosing_false
+0:09:08 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:09:08 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:09:08 Browser1 Close Tab7 at 5
+0:09:08 Tab7 WebContentsDestroyed
+0:09:13 Browser1 Switch from Tab6 to Tab3 at 1
+0:09:13 SwitchTab_Click
+0:09:14 Browser1 Switch from Tab3 to Tab1 at 0
+0:09:14 SwitchTab_Click
+0:10:13 Browser1 Switch from Tab1 to Tab5 at 3
+0:10:13 SwitchTab_Click
+0:10:13 Browser1 Switch from Tab5 to Tab6 at 4
+0:10:13 SwitchTab_Click
+0:10:14 Browser1 Switch from Tab6 to Tab4 at 2
+0:10:14 SwitchTab_Click
+0:10:14 Browser1 Switch from Tab4 to Tab3 at 1
+0:10:14 SwitchTab_Click
+0:10:14 Browser1 Switch from Tab3 to Tab1 at 0
+0:10:14 SwitchTab_Click
+0:10:15 Microsoft.UnloadController.IsUnclosableApp_IsNotWebApp

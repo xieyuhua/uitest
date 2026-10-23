@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Vue 商品后台 · 打包版本 B</title>
+<style>
+  /* 注意：这一版所有 hash 类名 / 作用域属性 / 自动 id 都变了，还多了一层包装 div，
+     表格多了一列、行内按钮顺序也换了——模拟真实改版重新打包。 */
+  body { margin:0; font-family:"Microsoft YaHei",system-ui,sans-serif; background:#f5f6fa; color:#1f2430; font-size:14px; }
+  .app-9f8e7d { padding:20px; max-width:840px; }
+  .el-form { background:#fff; border-radius:12px; padding:18px; box-shadow:0 1px 2px rgba(16,24,40,.06); }
+  .el-form-item { display:flex; align-items:center; margin-bottom:14px; }
+  .el-form-item__label { width:110px; text-align:right; padding-right:12px; color:#374151; }
+  .el-form-item__content { flex:1; }
+  .el-input__inner, .el-select__inner { width:100%; padding:8px 10px; border:1px solid #d6d9e3; border-radius:8px; font:inherit; }
+  .el-button { font:inherit; cursor:pointer; border:1px solid #d6d9e3; background:#fff; border-radius:8px; padding:8px 14px; }
+  .el-button--primary { background:#4f46e5; border-color:#4f46e5; color:#fff; }
+  .el-table { width:100%; border-collapse:collapse; margin-top:16px; background:#fff; border-radius:12px; }
+  .el-table th, .el-table td { text-align:left; padding:9px 10px; border-bottom:1px solid #eef0f5; font-size:13px; }
+  .el-table th { background:#fafbfe; color:#6b7280; font-weight:500; }
+  .el-button--text { border:none; background:none; color:#4f46e5; padding:0 6px; }
+  .toast { margin-top:12px; color:#16a34a; font-size:13px; }
+</style>
+</head>
+<body>
+<!-- 多包了一层 app-shell，纯结构路径（css > div:nth-of-type）必然变 -->
+<div class="app-shell" data-v-4e1c2a77>
+  <div id="app" class="app-9f8e7d" data-v-4e1c2a77>
+    <form class="el-form product-form_9f8e7d" data-v-4e1c2a77 autocomplete="off">
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>商品名称</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <div class="el-input-wrapper" data-v-4e1c2a77>
+            <div class="el-input" data-v-4e1c2a77>
+              <input class="el-input__inner input_9f8e7d" id="el-id-5566-31" placeholder="请输入商品名称">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>价格</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <div class="el-input-wrapper" data-v-4e1c2a77>
+            <div class="el-input" data-v-4e1c2a77>
+              <input class="el-input__inner input_9f8e7d" id="el-id-5566-32" placeholder="请输入价格">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>库存</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <div class="el-input-wrapper" data-v-4e1c2a77>
+            <div class="el-input" data-v-4e1c2a77>
+              <input class="el-input__inner input_9f8e7d" id="input-7" placeholder="请输入库存">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>商品分类</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <div class="el-select-wrapper" data-v-4e1c2a77>
+            <select class="el-select__inner select_9f8e7d" id="el-id-5566-33">
+              <option value="">请选择分类</option>
+              <option value="service">服务类</option>
+              <option value="goods">实物类</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77></label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <button type="button" class="el-button el-button--primary btn_9f8e7d" id="el-id-5566-34">保存商品</button>
+        </div>
+      </div>
+      <div class="toast" id="msg"></div>
+    </form>
+
+    <table class="el-table" data-v-4e1c2a77>
+      <thead><tr><th>名称</th><th>价格</th><th>库存</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>标准版服务</td><td>199.00</td><td>120</td>
+          <td>
+            <button type="button" class="el-button el-button--text" id="el-id-5566-40">删除</button>
+            <button type="button" class="el-button el-button--text" id="el-id-5566-41">编辑</button>
+          </td>
+        </tr>
+        <tr>
+          <td>旗舰版服务</td><td>499.00</td><td>37</td>
+          <td>
+            <button type="button" class="el-button el-button--text" id="el-id-5566-42">删除</button>
+            <button type="button" class="el-button el-button--text" id="el-id-5566-43">编辑</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+<script>
+  document.querySelector('#el-id-5566-34').addEventListener('click', function () {
+    document.getElementById('msg').textContent = '已保存：' + (document.querySelector('#el-id-5566-31').value || '(空)');
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>示例场景总览 · UI 自动化测试平台</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#f5f6fa;color:#1f2430}
+  .wrap{max-width:1040px;margin:0 auto;padding:28px 20px 48px}
+  h1{font-size:22px;margin:0 0 6px}
+  .sub{color:#6b7280;font-size:13px;margin-bottom:22px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+  .card{background:#fff;border:1px solid #e8eaf1;border-radius:14px;padding:16px 18px;text-decoration:none;color:inherit;display:block;transition:transform .12s, box-shadow .12s}
+  .card:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(16,24,40,.10)}
+  .card h2{font-size:15px;margin:0 0 8px;display:flex;align-items:center;gap:8px}
+  .no{width:22px;height:22px;border-radius:6px;background:#4f46e5;color:#fff;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .card p{margin:0 0 10px;color:#5b6270;font-size:13px;line-height:1.65}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef2ff;color:#4338ca}
+  .chip.g{background:#ecfdf5;color:#047857}
+  .chip.o{background:#fff7ed;color:#c2410c}
+  .tip{margin-top:26px;background:#fff;border:1px dashed #d6d9e3;border-radius:12px;padding:14px 16px;color:#4b5563;font-size:13px;line-height:1.8}
+  code{background:#f1f2f6;padding:1px 6px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>示例场景总览</h1>
+  <div class="sub">这些页面都按 <b>Vue/Element 打包后的样子</b> 写：hash 类名、<code>data-v-*</code> 作用域属性、组件库自动 id，几乎没有稳定 id —— 专门用来验证「重建安全定位」和各类动作。</div>
+
+  <div class="grid">
+    <a class="card" href="/demo/">
+      <h2><span class="no">1</span>基础表单（新建服务商品）</h2>
+      <p>最典型的表单：文本、数字、下拉、富文本、文件上传、保存按钮。带稳定 id，适合入门。</p>
+      <div class="chips"><span class="chip">表单填写</span><span class="chip">下拉选择</span><span class="chip g">上传</span></div>
+    </a>
+
+    <a class="card" href="/demo/login.html">
+      <h2><span class="no">2</span>登录页</h2>
+      <p>账号/密码 + 记住密码勾选 + 登录按钮，带前置校验。字段全靠表单项标题定位。</p>
+      <div class="chips"><span class="chip">表单项标题定位</span><span class="chip o">勾选</span><span class="chip o">断言提示语</span></div>
+    </a>
+
+    <a class="card" href="/demo/admin-list.html">
+      <h2><span class="no">3</span>列表 / 搜索 / 批量 / 行内操作</h2>
+      <p>关键词搜索 + 状态筛选 + 结果计数、全选与批量上架、每行的编辑/删除。查询按钮带 <code>data-testid</code>，可对比"有锚点 vs 没锚点"。</p>
+      <div class="chips"><span class="chip">表格行内按钮</span><span class="chip g">data-testid</span><span class="chip o">结果计数断言</span></div>
+    </a>
+
+    <a class="card" href="/demo/admin-dialog.html">
+      <h2><span class="no">4</span>弹窗表单 / 下拉 / 日期 / 开关</h2>
+      <p>点「新建活动」弹窗，填名称/类型/起止日期、切「是否上架」开关，保存后列表新增一行。先点保存能验证必填校验。</p>
+      <div class="chips"><span class="chip">弹窗内定位</span><span class="chip">日期输入</span><span class="chip o">switch 开关</span><span class="chip o">必填校验</span></div>
+    </a>
+
+    <a class="card" href="/demo/wizard.html">
+      <h2><span class="no">5</span>多步向导 / 校验</h2>
+      <p>填写信息 → 确认提交 → 完成。手机号为空点「下一步」会报错，用来验证校验提示与跨步骤断言。</p>
+      <div class="chips"><span class="chip">多步流程</span><span class="chip o">校验提示</span><span class="chip">汇总断言</span></div>
+    </a>
+
+    <a class="card" href="/demo/settings-tabs.html">
+      <h2><span class="no">6</span>标签页 / 开关 / 单选 / 富文本 / 上传</h2>
+      <p>基础设置与高级设置两个 tab，含营业状态开关、店铺类型单选、欢迎语富文本、Logo 上传。</p>
+      <div class="chips"><span class="chip">tab 切换</span><span class="chip o">开关</span><span class="chip">单选</span><span class="chip g">上传</span></div>
+    </a>
+
+    <a class="card" href="/demo/vue-v1.html">
+      <h2><span class="no">7</span>打包版本 A</h2>
+      <p>商品表单 + 表格。记录「版本 A 的定位」，用版本 B 回放，验证重新打包后依然命中。</p>
+      <div class="chips"><span class="chip">hash 类名</span><span class="chip">自动 id</span><span class="chip g">跨版本验证</span></div>
+    </a>
+
+    <a class="card" href="/demo/vue-v2.html">
+      <h2><span class="no">8</span>打包版本 B（模拟重新打包）</h2>
+      <p>所有 hash/id 都变了，还多了一层包装 div、表格多一列、行内按钮顺序调换。</p>
+      <div class="chips"><span class="chip">结构变化</span><span class="chip o">顺序调换</span><span class="chip g">跨版本验证</span></div>
+    </a>
+  </div>
+
+  <div class="tip">
+    <b>怎么用：</b>在控制台「录制」里新建录制，把起始页填成上面任意场景地址，用浏览器插件操作一遍即可。<br>
+    想一次性验证所有场景：在项目目录执行 <code>go run ./cmd/scenarios</code>，
+    它会自动为每个场景建录制、跑执行、逐条断言，最后打印结果表。
+  </div>
+</div>
+</body>
+</html>

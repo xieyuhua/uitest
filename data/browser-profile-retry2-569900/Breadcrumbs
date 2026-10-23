@@ -1,0 +1,76 @@
+0:03:27 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:03:27 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:03:27 Browser1 Close Tab9 at 5
+0:03:27 Tab9 WebContentsDestroyed
+0:03:28 CloseTab_NoAlertIndicator
+0:03:28 Microsoft.Shutdown.TabStripModel.CloseTabs
+0:03:28 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl
+0:03:28 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_TabClosable
+0:03:28 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_NotClosingAll
+0:03:28 Microsoft.Shutdown.TabStripModel.CloseWebContentses
+0:03:28 Microsoft.Shutdown.TabStripModel.CloseWebContentses_FastShutdown
+0:03:28 Tab10 RenderProcessGone
+0:03:28 Microsoft.Shutdown.TabStripModel.RunUnloadListenerBeforeClosing_false
+0:03:28 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:03:28 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:03:28 Browser1 Close Tab10 at 5
+0:03:28 Tab10 WebContentsDestroyed
+0:05:20 CloseTab_NoAlertIndicator
+0:05:20 Microsoft.Shutdown.TabStripModel.CloseTabs
+0:05:20 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl
+0:05:20 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_TabClosable
+0:05:20 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_NotClosingAll
+0:05:20 Microsoft.Shutdown.TabStripModel.CloseWebContentses
+0:05:20 Microsoft.Shutdown.TabStripModel.CloseWebContentses_FastShutdown
+0:05:20 Tab8 RenderProcessGone
+0:05:20 Microsoft.Shutdown.TabStripModel.RunUnloadListenerBeforeClosing_false
+0:05:20 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:05:20 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:05:20 Browser1 Close Tab8 at 4
+0:05:20 Tab8 WebContentsDestroyed
+0:05:20 Browser1 Switch from Tab7 to Tab4 at 1
+0:05:20 SwitchTab_Click
+0:05:21 Browser1 Switch from Tab4 to Tab1 at 0
+0:05:21 SwitchTab_Click
+0:05:22 CloseTab_NoAlertIndicator
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseTabs
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_TabClosable
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_NotClosingAll
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseWebContentses
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseWebContentses_FastShutdown
+0:05:22 Tab1 RemoveInfobar43
+0:05:22 Tab1 RenderProcessGone
+0:05:22 Microsoft.Shutdown.TabStripModel.RunUnloadListenerBeforeClosing_false
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:05:22 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:05:22 Browser1 Close Tab1 at 0
+0:05:22 Tab1 WebContentsDestroyed
+0:05:22 CloseTab_NoAlertIndicator
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseTabs
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_TabClosable
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_NotClosingAll
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseWebContentses
+0:05:22 Microsoft.Shutdown.TabStripModel.CloseWebContentses_FastShutdown
+0:05:22 Tab4 RenderProcessGone
+0:05:22 Microsoft.Shutdown.TabStripModel.RunUnloadListenerBeforeClosing_false
+0:05:22 Microsoft.Shutdown.TabStripModel.InternalCloseTabsImpl_ClosedAll
+0:05:22 Microsoft.Shutdown.TabStripModel.SendDetachWebContentsNotifications
+0:05:22 Browser1 Close Tab4 at 0
+0:05:22 Tab4 WebContentsDestroyed
+0:05:24 Tab5 StartNav37 #renderer-user #link
+0:05:24 Tab5 FinishNav37
+0:05:24 Tab5 StartNav38 #renderer-user #link
+0:05:24 Tab5 FinishNav38
+0:05:25 Tab5 StartNav39 #renderer-user #link
+0:05:25 Tab5 FinishNav39
+0:05:25 Tab5 StartNav40 #renderer-user #link
+0:05:25 Tab5 FinishNav40
+0:05:25 Tab5 StartNav41 #renderer-user #link
+0:05:25 Tab5 FinishNav41
+0:05:37 Widget Closed: StatusBubble
+0:07:29 Widget Closed: StatusBubble
+0:07:29 Browser1 Switch from Tab5 to Tab7 at 1
+0:07:29 SwitchTab_Click
+0:07:35 Microsoft.UnloadController.IsUnclosableApp_IsNotWebApp

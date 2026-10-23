@@ -1,0 +1,7 @@
+# 本地下载的浏览器内核（体积大，不入库；用 scripts/fetch-browser.ps1 重新获取）
+browser/
+
+# 本地启动日志与临时产物
+data-start*.log
+*.tmp
+uitest-server.exe~

@@ -1,0 +1,5 @@
+2026/10/22-16:36:21.547 6ed0 Reusing MANIFEST E:\workspace\kefu\uitest\data\browser-profile-retry2-450400\Default\Local Storage\leveldb/MANIFEST-000001
+2026/10/22-16:36:21.547 6ed0 Recovering log #3
+2026/10/22-16:36:21.549 6ed0 Level-0 table #3: started
+2026/10/22-16:36:21.593 6ed0 Level-0 table #3: 287707 bytes OK
+2026/10/22-16:36:21.610 6ed0 Delete type=0 #3

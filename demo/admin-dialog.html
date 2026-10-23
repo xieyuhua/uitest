@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>场景 3 · 弹窗表单 / 下拉 / 日期 / 开关（Vue 编译后）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#f5f6fa;color:#1f2430;font-size:13px}
+  .page_a1b2c3{padding:20px;max-width:960px}
+  .el-card_x9y8{background:#fff;border:1px solid #e8eaf1;border-radius:12px;padding:14px 16px;margin-bottom:14px}
+  .head-row{display:flex;align-items:center;margin-bottom:12px}
+  .head-row h3{margin:0;font-size:15px}
+  .el-button{font:inherit;cursor:pointer;border:1px solid #d6d9e3;background:#fff;border-radius:8px;padding:8px 14px}
+  .el-button--primary{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .el-button--text{border:none;background:none;color:#4f46e5;padding:0 6px}
+  .pull-right{margin-left:auto}
+  .el-table{width:100%;border-collapse:collapse}
+  .el-table th,.el-table td{text-align:left;padding:9px 10px;border-bottom:1px solid #eef0f5}
+  .el-table th{background:#fafbfe;color:#6b7280;font-weight:500}
+  .el-tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px;background:#eef2ff;color:#4338ca}
+  .el-dialog-mask{position:fixed;inset:0;background:rgba(17,24,39,.45);display:none;align-items:center;justify-content:center;z-index:20}
+  .el-dialog-mask.is-open{display:flex}
+  .el-dialog{background:#fff;border-radius:14px;width:460px;padding:20px 22px;box-shadow:0 24px 60px rgba(16,24,40,.28)}
+  .el-dialog__header{font-size:15px;font-weight:600;margin-bottom:14px}
+  .el-form-item{display:flex;align-items:center;margin-bottom:13px}
+  .el-form-item__label{width:96px;text-align:right;padding-right:12px;color:#4b5563;flex:0 0 auto}
+  .el-form-item__content{flex:1}
+  .el-input__inner,.el-select__inner{width:100%;padding:8px 10px;border:1px solid #d6d9e3;border-radius:8px;font:inherit;outline:none}
+  .el-input__inner:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+  .el-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#4b5563}
+  .el-switch__core{width:38px;height:20px;border-radius:20px;background:#d1d5db;position:relative;transition:background .18s}
+  .el-switch__core::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .18s}
+  .el-switch.is-checked .el-switch__core{background:#4f46e5}
+  .el-switch.is-checked .el-switch__core::after{left:20px}
+  .err-tip{color:#dc2626;font-size:12px;margin:-6px 0 10px 108px;display:none}
+  .err-tip.is-show{display:block}
+  .el-toast{position:fixed;right:20px;bottom:20px;background:#111827;color:#fff;padding:9px 14px;border-radius:9px;opacity:0;transition:opacity .2s}
+  .el-toast.is-show{opacity:1}
+</style>
+</head>
+<body>
+<div class="page_a1b2c3" data-v-7d3e91>
+  <div class="el-card_x9y8" data-v-7d3e91>
+    <div class="head-row">
+      <h3>活动列表</h3>
+      <button type="button" class="el-button el-button--primary pull-right" id="el-id-5501-1">新建活动</button>
+    </div>
+    <table class="el-table">
+      <thead><tr><th>活动名称</th><th>类型</th><th>开始日期</th><th>结束日期</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="act-tbody">
+        <tr>
+          <td>双十一满减</td><td><span class="el-tag">满减</span></td><td>2026-11-01</td><td>2026-11-12</td>
+          <td>进行中</td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="el-toast" id="toast"></div>
+
+<!-- 弹窗：字段都靠 label 文字定位（组件库自动 id 每次打包都变） -->
+<div class="el-dialog-mask" id="dlg-mask">
+  <div class="el-dialog">
+    <div class="el-dialog__header">新建活动</div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">活动名称</label>
+      <div class="el-form-item__content">
+        <input class="el-input__inner" id="el-id-5501-11" placeholder="例如：双十二满减">
+      </div>
+    </div>
+    <div class="err-tip" id="err-name">请填写活动名称</div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">活动类型</label>
+      <div class="el-form-item__content">
+        <select class="el-select__inner" id="el-id-5501-12">
+          <option value="">请选择类型</option>
+          <option value="满减">满减</option>
+          <option value="折扣">折扣</option>
+          <option value="秒杀">秒杀</option>
+        </select>
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">开始日期</label>
+      <div class="el-form-item__content">
+        <input class="el-input__inner" id="el-id-5501-13" type="date">
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">结束日期</label>
+      <div class="el-form-item__content">
+        <input class="el-input__inner" id="el-id-5501-14" type="date">
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">是否上架</label>
+      <div class="el-form-item__content">
+        <span class="el-switch" id="el-id-5501-15" role="switch" aria-checked="false" tabindex="0">
+          <span class="el-switch__core"></span><span class="el-switch__label">上架</span>
+        </span>
+      </div>
+    </div>
+    <div style="text-align:right;margin-top:18px">
+      <button type="button" class="el-button" id="dlg-cancel">取消</button>
+      <button type="button" class="el-button el-button--primary" id="dlg-ok">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  var mask = document.getElementById('dlg-mask');
+  var nameInput = document.getElementById('el-id-5501-11');
+  var typeSel = document.getElementById('el-id-5501-12');
+  var startDate = document.getElementById('el-id-5501-13');
+  var endDate = document.getElementById('el-id-5501-14');
+  var sw = document.getElementById('el-id-5501-15');
+  var errName = document.getElementById('err-name');
+  var toast = document.getElementById('toast');
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('is-show');
+    setTimeout(function () { toast.classList.remove('is-show'); }, 2200);
+  }
+  function openDialog() {
+    nameInput.value = ''; typeSel.value = ''; startDate.value = ''; endDate.value = '';
+    sw.classList.remove('is-checked'); sw.setAttribute('aria-checked', 'false');
+    errName.classList.remove('is-show');
+    mask.classList.add('is-open');
+  }
+
+  document.getElementById('el-id-5501-1').addEventListener('click', openDialog);
+  document.getElementById('dlg-cancel').addEventListener('click', function () { mask.classList.remove('is-open'); });
+
+  // switch 用真实 checkbox 语义不好模拟，这里点自己切换 + 同步 aria
+  sw.addEventListener('click', function () {
+    var on = sw.classList.toggle('is-checked');
+    sw.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+
+  document.getElementById('dlg-ok').addEventListener('click', function () {
+    var name = nameInput.value.trim();
+    if (!name) { errName.classList.add('is-show'); return; }
+    var tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + name + '</td>' +
+      '<td><span class="el-tag">' + (typeSel.value || '满减') + '</span></td>' +
+      '<td>' + (startDate.value || '-') + '</td>' +
+      '<td>' + (endDate.value || '-') + '</td>' +
+      '<td>' + (sw.classList.contains('is-checked') ? '已上架' : '未上架') + '</td>' +
+      '<td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button></td>';
+    document.getElementById('act-tbody').appendChild(tr);
+    mask.classList.remove('is-open');
+    showToast('保存成功：' + name);
+  });
+</script>
+</body>
+</html>

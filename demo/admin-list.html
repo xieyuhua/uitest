@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>场景 2 · 列表 / 搜索 / 批量 / 行内操作（Vue 编译后）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#f5f6fa;color:#1f2430;font-size:13px}
+  .page_7c1d2e{padding:20px;max-width:1000px}
+  .el-card_5b9e{background:#fff;border:1px solid #e8eaf1;border-radius:12px;padding:14px 16px;margin-bottom:14px}
+  .toolbar_7c1d{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .el-input__inner,.el-select__inner{padding:8px 10px;border:1px solid #d6d9e3;border-radius:8px;font:inherit;outline:none}
+  .el-input__inner:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+  .el-button{font:inherit;cursor:pointer;border:1px solid #d6d9e3;background:#fff;border-radius:8px;padding:8px 14px}
+  .el-button--primary{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .el-button--text{border:none;background:none;color:#4f46e5;padding:0 6px}
+  .el-button--danger{color:#dc2626}
+  .el-table{width:100%;border-collapse:collapse}
+  .el-table th,.el-table td{text-align:left;padding:9px 10px;border-bottom:1px solid #eef0f5}
+  .el-table th{background:#fafbfe;color:#6b7280;font-weight:500}
+  .el-table tr.is-empty td{color:#9aa0b0;text-align:center;padding:24px}
+  .el-tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px}
+  .el-tag--success{background:#ecfdf5;color:#047857}
+  .el-tag--info{background:#f1f2f6;color:#6b7280}
+  .result_1a2b{color:#6b7280;margin-left:auto}
+  .el-checkbox{width:14px;height:14px;cursor:pointer}
+  .el-toast{position:fixed;right:20px;bottom:20px;background:#111827;color:#fff;padding:9px 14px;border-radius:9px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .el-toast.is-show{opacity:1}
+  .el-dialog-mask{position:fixed;inset:0;background:rgba(17,24,39,.45);display:none;align-items:center;justify-content:center}
+  .el-dialog-mask.is-open{display:flex}
+  .el-dialog{background:#fff;border-radius:14px;padding:20px 22px;width:360px;box-shadow:0 24px 60px rgba(16,24,40,.28)}
+  .el-dialog__title{font-size:15px;font-weight:600;margin-bottom:10px}
+  .el-dialog__body{color:#4b5563;line-height:1.7;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="page_7c1d2e" data-v-c3a1b2>
+  <!-- 工具栏：搜索框没 label，只能靠 placeholder 定位 -->
+  <div class="el-card_5b9e toolbar_7c1d" data-v-c3a1b2>
+    <input class="el-input__inner search_7c1d" id="el-id-9021-1" placeholder="搜索商品名称" style="width:210px">
+    <select class="el-select__inner filter_7c1d" id="el-id-9021-2">
+      <option value="">全部状态</option>
+      <option value="on">在售</option>
+      <option value="off">已下架</option>
+    </select>
+    <!-- 这个按钮团队补了稳定锚点，用来对比"有 data-testid"的元素 -->
+    <button type="button" class="el-button el-button--primary" id="el-id-9021-3" data-testid="btn-search">查询</button>
+    <button type="button" class="el-button" id="el-id-9021-4">重置</button>
+    <button type="button" class="el-button" id="el-id-9021-5">批量上架</button>
+    <span class="result_1a2b" id="el-result">共 5 条</span>
+  </div>
+
+  <div class="el-card_5b9e" data-v-c3a1b2>
+    <table class="el-table" id="el-table-1">
+      <thead>
+        <tr>
+          <th style="width:34px"><input type="checkbox" class="el-checkbox" id="el-check-all"></th>
+          <th>商品名称</th><th>价格</th><th>库存</th><th>状态</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="el-tbody">
+        <tr>
+          <td><input type="checkbox" class="el-checkbox"></td>
+          <td>标准版服务</td><td>199.00</td><td>120</td>
+          <td><span class="el-tag el-tag--success">在售</span></td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button><button type="button" class="el-button el-button--text el-button--danger" data-act="del">删除</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="el-checkbox"></td>
+          <td>旗舰版服务</td><td>499.00</td><td>37</td>
+          <td><span class="el-tag el-tag--success">在售</span></td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button><button type="button" class="el-button el-button--text el-button--danger" data-act="del">删除</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="el-checkbox"></td>
+          <td>季度维护包</td><td>899.00</td><td>8</td>
+          <td><span class="el-tag el-tag--info">已下架</span></td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button><button type="button" class="el-button el-button--text el-button--danger" data-act="del">删除</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="el-checkbox"></td>
+          <td>培训课时包</td><td>1299.00</td><td>15</td>
+          <td><span class="el-tag el-tag--success">在售</span></td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button><button type="button" class="el-button el-button--text el-button--danger" data-act="del">删除</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="el-checkbox"></td>
+          <td>年度顾问服务</td><td>4999.00</td><td>3</td>
+          <td><span class="el-tag el-tag--info">已下架</span></td>
+          <td><button type="button" class="el-button el-button--text" data-act="edit">编辑</button><button type="button" class="el-button el-button--text el-button--danger" data-act="del">删除</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="el-toast" id="el-toast"></div>
+<div class="el-dialog-mask" id="el-mask">
+  <div class="el-dialog">
+    <div class="el-dialog__title" id="dlg-title">编辑商品</div>
+    <div class="el-dialog__body" id="dlg-body"></div>
+    <div style="text-align:right">
+      <button type="button" class="el-button" id="dlg-cancel">取消</button>
+      <button type="button" class="el-button el-button--primary" id="dlg-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  var keyword = document.getElementById('el-id-9021-1');
+  var statusSel = document.getElementById('el-id-9021-2');
+  var result = document.getElementById('el-result');
+  var tbody = document.getElementById('el-tbody');
+  var toast = document.getElementById('el-toast');
+
+  function rows() { return Array.prototype.slice.call(tbody.querySelectorAll('tr')); }
+  function rowName(tr) { return tr.children[1].textContent.trim(); }
+  function rowStatus(tr) { return tr.children[4].textContent.trim(); }
+
+  function applyFilter() {
+    var kw = keyword.value.trim();
+    var st = statusSel.value;
+    var shown = 0;
+    rows().forEach(function (tr) {
+      var okKw = !kw || rowName(tr).indexOf(kw) >= 0;
+      var okSt = !st || (st === 'on' ? rowStatus(tr) === '在售' : rowStatus(tr) === '已下架');
+      var ok = okKw && okSt;
+      tr.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    });
+    result.textContent = '共 ' + shown + ' 条';
+  }
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('is-show');
+    setTimeout(function () { toast.classList.remove('is-show'); }, 2200);
+  }
+
+  document.getElementById('el-id-9021-3').addEventListener('click', applyFilter);
+  document.getElementById('el-id-9021-4').addEventListener('click', function () {
+    keyword.value = ''; statusSel.value = ''; applyFilter();
+  });
+  document.getElementById('el-id-9021-5').addEventListener('click', function () {
+    var picked = rows().filter(function (tr) { return tr.querySelector('.el-checkbox').checked; });
+    showToast(picked.length ? ('已批量上架 ' + picked.length + ' 个商品') : '请先勾选商品');
+  });
+  document.getElementById('el-check-all').addEventListener('change', function (e) {
+    rows().forEach(function (tr) { tr.querySelector('.el-checkbox').checked = e.target.checked; });
+  });
+
+  tbody.addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    var tr = btn.closest('tr');
+    var name = rowName(tr);
+    if (btn.getAttribute('data-act') === 'edit') {
+      document.getElementById('dlg-title').textContent = '编辑商品';
+      document.getElementById('dlg-body').textContent = '正在编辑：' + name;
+      document.getElementById('el-mask').classList.add('is-open');
+    } else {
+      tr.remove();
+      applyFilter();
+      showToast('已删除：' + name);
+    }
+  });
+  document.getElementById('dlg-cancel').addEventListener('click', function () {
+    document.getElementById('el-mask').classList.remove('is-open');
+  });
+  document.getElementById('dlg-ok').addEventListener('click', function () {
+    document.getElementById('el-mask').classList.remove('is-open');
+    showToast('已保存');
+  });
+</script>
+</body>
+</html>

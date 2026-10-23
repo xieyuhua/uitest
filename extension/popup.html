@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>UI 自动化录制器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- 顶部：标题 + 服务端连接状态 + 版本 -->
+  <header class="head">
+    <div class="title-row">
+      <h1 class="title">UI 自动化录制器</h1>
+      <span id="healthDot" class="dot dot-unknown" title="服务端连接状态"></span>
+      <span class="version">v1.0.0</span>
+    </div>
+    <div id="healthText" class="health-text">正在检测服务端…</div>
+  </header>
+
+  <!-- 服务端地址 -->
+  <section class="card">
+    <label class="field-label" for="serverUrl">服务端地址</label>
+    <div class="row">
+      <input id="serverUrl" class="input" type="text" spellcheck="false" autocomplete="off"
+             placeholder="http://127.0.0.1:8490">
+      <button id="testBtn" class="btn btn-ghost" type="button">测试连接</button>
+    </div>
+  </section>
+
+  <!-- 录制控制 -->
+  <section class="card">
+    <label class="field-label" for="recName">录制名称</label>
+    <input id="recName" class="input" type="text" autocomplete="off"
+           placeholder="例如：新建服务商品 / 上传商品 / 设置秒杀活动">
+    <div class="row row-gap">
+      <button id="startBtn" class="btn btn-primary" type="button">开始录制</button>
+      <button id="stopBtn" class="btn btn-danger is-hidden" type="button">停止录制</button>
+      <span id="recMeta" class="meta is-hidden"></span>
+    </div>
+    <div id="recorderRow" class="row row-gap is-hidden">
+      <span id="recorderText" class="meta">录制脚本：未就位</span>
+      <button id="injectBtn" class="btn btn-ghost" type="button">注入录制脚本</button>
+    </div>
+  </section>
+
+  <!-- 上一步备注 -->
+  <section class="card">
+    <label class="field-label" for="note">上一步备注</label>
+    <textarea id="note" class="input textarea" rows="2"
+              placeholder="例如：在商品名称输入框填入测试商品名"></textarea>
+    <div class="row row-gap">
+      <button id="noteBtn" class="btn btn-ghost" type="button">保存备注</button>
+      <span class="hint">备注越清楚，执行越不容易错位</span>
+    </div>
+  </section>
+
+  <!-- 回车键开关 -->
+  <section class="card">
+    <label class="switch" for="enterSwitch">
+      <input id="enterSwitch" type="checkbox">
+      <span class="switch-text">回车键也记录</span>
+    </label>
+  </section>
+
+  <!-- 最近录制 -->
+  <section class="card">
+    <div class="field-label">最近录制</div>
+    <ul id="recent" class="recent">
+      <li class="empty">暂无录制记录</li>
+    </ul>
+  </section>
+
+  <!-- 错误提示（红字，不弹 alert） -->
+  <div id="error" class="error is-hidden"></div>
+
+  <footer class="foot">
+    <a id="consoleLink" class="link" href="#">打开控制台</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

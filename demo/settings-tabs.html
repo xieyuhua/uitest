@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>场景 5 · 标签页 / 开关 / 单选 / 富文本 / 上传（Vue 编译后）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#f5f6fa;color:#1f2430;font-size:13px}
+  .page_t5u6{padding:20px;max-width:780px}
+  .el-card_r3s4{background:#fff;border:1px solid #e8eaf1;border-radius:12px;padding:0 18px 18px}
+  .el-tabs{display:flex;gap:4px;border-bottom:1px solid #eef0f5;margin-bottom:16px}
+  .el-tabs__item{padding:12px 16px;color:#6b7280;cursor:pointer;border-bottom:2px solid transparent;user-select:none}
+  .el-tabs__item.is-active{color:#4f46e5;border-bottom-color:#4f46e5;font-weight:600}
+  .pane{display:none}
+  .pane.is-active{display:block}
+  .el-form-item{display:flex;align-items:center;margin-bottom:14px}
+  .el-form-item__label{width:104px;text-align:right;padding-right:12px;color:#4b5563;flex:0 0 auto}
+  .el-form-item__content{flex:1}
+  .el-input__inner,textarea.el-input__inner{width:100%;padding:8px 10px;border:1px solid #d6d9e3;border-radius:8px;font:inherit;outline:none}
+  textarea.el-input__inner{min-height:84px;resize:vertical}
+  .el-input__inner:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+  .el-button{font:inherit;cursor:pointer;border:1px solid #d6d9e3;background:#fff;border-radius:8px;padding:8px 16px}
+  .el-button--primary{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .el-radio-group{display:flex;gap:14px}
+  .el-radio{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#4b5563}
+  .el-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#4b5563}
+  .el-switch__core{width:38px;height:20px;border-radius:20px;background:#d1d5db;position:relative;transition:background .18s;display:inline-block}
+  .el-switch__core::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .18s}
+  .el-switch.is-checked .el-switch__core{background:#4f46e5}
+  .el-switch.is-checked .el-switch__core::after{left:20px}
+  .upload-line{display:flex;align-items:center;gap:10px;color:#6b7280}
+  .el-toast{position:fixed;right:20px;bottom:20px;background:#111827;color:#fff;padding:9px 14px;border-radius:9px;opacity:0;transition:opacity .2s}
+  .el-toast.is-show{opacity:1}
+  .actions{margin-top:18px;text-align:right}
+</style>
+</head>
+<body>
+<div class="page_t5u6" data-v-8b1c44>
+  <div class="el-card_r3s4" data-v-8b1c44>
+    <div class="el-tabs" role="tablist">
+      <div class="el-tabs__item is-active" role="tab" data-tab="basic">基础设置</div>
+      <div class="el-tabs__item" role="tab" data-tab="advanced">高级设置</div>
+    </div>
+
+    <!-- 基础设置 -->
+    <div class="pane is-active" id="pane-basic">
+      <div class="el-form-item">
+        <label class="el-form-item__label">店铺名称</label>
+        <div class="el-form-item__content"><input class="el-input__inner" id="el-id-7700-1" placeholder="请输入店铺名称"></div>
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">客服电话</label>
+        <div class="el-form-item__content"><input class="el-input__inner" id="el-id-7700-2" placeholder="请输入客服电话"></div>
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">营业状态</label>
+        <div class="el-form-item__content">
+          <span class="el-switch" id="el-id-7700-3" role="switch" aria-checked="false" tabindex="0">
+            <span class="el-switch__core"></span><span class="el-switch__label">营业中</span>
+          </span>
+        </div>
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">店铺类型</label>
+        <div class="el-form-item__content">
+          <div class="el-radio-group">
+            <label class="el-radio"><input type="radio" name="shopType" value="自营"> 自营</label>
+            <label class="el-radio"><input type="radio" name="shopType" value="加盟"> 加盟</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 高级设置 -->
+    <div class="pane" id="pane-advanced">
+      <div class="el-form-item">
+        <label class="el-form-item__label">自动回复</label>
+        <div class="el-form-item__content">
+          <span class="el-switch" id="el-id-7700-11" role="switch" aria-checked="false" tabindex="0">
+            <span class="el-switch__core"></span><span class="el-switch__label">开启</span>
+          </span>
+        </div>
+      </div>
+      <div class="el-form-item" style="align-items:flex-start">
+        <label class="el-form-item__label" style="padding-top:8px">欢迎语</label>
+        <div class="el-form-item__content">
+          <textarea class="el-input__inner" id="el-id-7700-12" placeholder="客户进线时自动发送的内容"></textarea>
+        </div>
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">店铺 Logo</label>
+        <div class="el-form-item__content">
+          <div class="upload-line">
+            <input type="file" id="el-id-7700-13" accept="image/*">
+            <span id="upload-name">未选择文件</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions"><button type="button" class="el-button el-button--primary" id="btn-save">保存设置</button></div>
+  </div>
+</div>
+<div class="el-toast" id="toast"></div>
+
+<script>
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.el-tabs__item'));
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      tabs.forEach(function (x) { x.classList.remove('is-active'); });
+      t.classList.add('is-active');
+      document.getElementById('pane-basic').classList.toggle('is-active', t.getAttribute('data-tab') === 'basic');
+      document.getElementById('pane-advanced').classList.toggle('is-active', t.getAttribute('data-tab') === 'advanced');
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll('.el-switch')).forEach(function (sw) {
+    sw.addEventListener('click', function () {
+      var on = sw.classList.toggle('is-checked');
+      sw.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  });
+
+  document.getElementById('el-id-7700-13').addEventListener('change', function (e) {
+    document.getElementById('upload-name').textContent = e.target.files.length ? e.target.files[0].name : '未选择文件';
+  });
+
+  function showToast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('is-show');
+    setTimeout(function () { t.classList.remove('is-show'); }, 2400);
+  }
+
+  document.getElementById('btn-save').addEventListener('click', function () {
+    var shop = document.getElementById('el-id-7700-1').value.trim();
+    var auto = document.getElementById('el-id-7700-11').classList.contains('is-checked');
+    var file = document.getElementById('upload-name').textContent;
+    showToast('已保存：' + (shop || '(未填店铺名)') + ' · 自动回复' + (auto ? '已开启' : '关闭') + ' · Logo ' + file);
+  });
+</script>
+</body>
+</html>

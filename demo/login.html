@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>场景 1 · 登录（Vue 编译后）</title>
+<style>
+  /* 模拟 Vue 打包产物：hash 类名 + data-v 作用域属性 + 组件库自动 id，
+     页面里几乎没有稳定 id，定位只能靠标签/占位文字/按钮文字。 */
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:linear-gradient(160deg,#eef1fb,#f7f8fc 55%,#eef7f4);color:#1f2430;font-size:14px;min-height:100vh}
+  .login-wrap_9f8e7d{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px}
+  .el-card_4e1c2a77{width:400px;background:#fff;border-radius:16px;padding:30px 28px;box-shadow:0 18px 50px rgba(16,24,40,.12)}
+  .brand_9f8e7d{display:flex;align-items:center;gap:10px;margin-bottom:22px}
+  .logo_4e1c{width:38px;height:38px;border-radius:10px;background:#4f46e5;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .brand-title_1a2b{font-size:17px;font-weight:600}
+  .brand-sub_1a2b{font-size:12px;color:#8a90a2;margin-top:2px}
+  .el-form-item{margin-bottom:16px;display:block}
+  .el-form-item__label{display:block;font-size:13px;color:#4b5563;margin-bottom:6px}
+  .el-input__inner,.el-select__inner{width:100%;padding:10px 12px;border:1px solid #d6d9e3;border-radius:9px;font:inherit;outline:none}
+  .el-input__inner:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+  .el-checkbox{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:#4b5563;cursor:pointer}
+  .el-button{font:inherit;cursor:pointer;border-radius:9px;padding:10px 16px;border:1px solid #d6d9e3;background:#fff}
+  .el-button--primary{width:100%;background:#4f46e5;border-color:#4f46e5;color:#fff;font-weight:600}
+  .el-button--primary:active{transform:translateY(1px)}
+  .row-between{display:flex;align-items:center;justify-content:space-between;margin:4px 0 18px}
+  .link_1a2b{color:#4f46e5;font-size:13px;text-decoration:none}
+  .el-alert{margin-top:14px;padding:10px 12px;border-radius:9px;font-size:13px;display:none}
+  .el-alert.is-show{display:block}
+  .el-alert--success{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0}
+  .el-alert--error{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+  .foot_9f8e7d{margin-top:18px;font-size:12px;color:#9aa0b0;text-align:center}
+</style>
+</head>
+<body>
+<div id="app" class="login-wrap_9f8e7d" data-v-4e1c2a77>
+  <div class="el-card_4e1c2a77" data-v-4e1c2a77>
+    <div class="brand_9f8e7d" data-v-4e1c2a77>
+      <div class="logo_4e1c" data-v-4e1c2a77>客</div>
+      <div>
+        <div class="brand-title_1a2b" data-v-4e1c2a77>客服后台管理系统</div>
+        <div class="brand-sub_1a2b" data-v-4e1c2a77>Customer Service Console</div>
+      </div>
+    </div>
+
+    <form id="el-form-3812" autocomplete="off" data-v-4e1c2a77>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>登录账号</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <input class="el-input__inner input_1a2b3c" id="el-id-3812-11" placeholder="请输入账号或手机号">
+        </div>
+      </div>
+      <div class="el-form-item" data-v-4e1c2a77>
+        <label class="el-form-item__label" data-v-4e1c2a77>登录密码</label>
+        <div class="el-form-item__content" data-v-4e1c2a77>
+          <input class="el-input__inner input_1a2b3c" id="el-id-3812-12" type="password" placeholder="请输入密码">
+        </div>
+      </div>
+      <div class="row-between" data-v-4e1c2a77>
+        <label class="el-checkbox" data-v-4e1c2a77>
+          <input type="checkbox" id="el-id-3812-13">
+          <span>记住密码</span>
+        </label>
+        <a class="link_1a2b" href="#forgot" data-v-4e1c2a77>忘记密码？</a>
+      </div>
+      <button type="button" class="el-button el-button--primary btn_9f8e7d" id="el-id-3812-14">登 录</button>
+      <div class="el-alert" id="el-alert-1" data-v-4e1c2a77></div>
+    </form>
+
+    <div class="foot_9f8e7d" data-v-4e1c2a77>示例页面 · 用于验证「表单项标题 → 控件」定位与勾选/断言</div>
+  </div>
+</div>
+<script>
+  // 模拟 Vue 组件逻辑（真实项目里这些是编译后的 render 函数）
+  var account = document.getElementById('el-id-3812-11');
+  var password = document.getElementById('el-id-3812-12');
+  var remember = document.getElementById('el-id-3812-13');
+  var alertBox = document.getElementById('el-alert-1');
+
+  function show(kind, text) {
+    alertBox.className = 'el-alert is-show ' + (kind === 'ok' ? 'el-alert--success' : 'el-alert--error');
+    alertBox.textContent = text;
+  }
+
+  document.getElementById('el-id-3812-14').addEventListener('click', function () {
+    if (!account.value.trim()) { show('err', '请输入账号'); return; }
+    if (!password.value.trim()) { show('err', '请输入密码'); return; }
+    if (password.value.length < 4) { show('err', '密码至少 4 位'); return; }
+    show('ok', '登录成功，欢迎 ' + account.value.trim() + (remember.checked ? '（已记住密码）' : ''));
+  });
+</script>
+</body>
+</html>
