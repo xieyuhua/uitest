@@ -137,14 +137,14 @@ func (db *DB) DeleteAllHarvestTasks() (int, int) {
 			runs++
 		}
 	}
-	db.data.HarvestTasks = map[string]model.HarvestTask{}
+	db.data.HarvestTasks = map[string]*model.HarvestTask{}
 	if tasks > 0 || runs > 0 {
 		db.markDirty()
 	}
 	return tasks, runs
 }
 
-/* -------------------------------------------------------------- 运行 CRUD */// CreateHarvestRun 写入一次采集运行（状态 queued）。
+/* -------------------------------------------------------------- 运行 CRUD */ // CreateHarvestRun 写入一次采集运行（状态 queued）。
 func (db *DB) CreateHarvestRun(r model.HarvestRun) (model.HarvestRun, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()

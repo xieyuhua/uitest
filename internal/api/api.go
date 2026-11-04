@@ -97,10 +97,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/collect/captures/{id}/requests", s.deleteCaptureRequests)
 	mux.HandleFunc("POST /api/collect/captures/{id}/analyze", s.analyzeCapture)
 	mux.HandleFunc("DELETE /api/collect/captures/{id}", s.deleteCapture)
+	mux.HandleFunc("DELETE /api/collect/captures", s.clearCaptures)
 	mux.HandleFunc("POST /api/collect/analyze", s.analyzeBody)
 
 	mux.HandleFunc("GET /api/collect/tasks", s.listHarvestTasks)
 	mux.HandleFunc("POST /api/collect/tasks", s.createHarvestTask)
+	mux.HandleFunc("DELETE /api/collect/tasks", s.clearHarvestTasks)
 	mux.HandleFunc("GET /api/collect/tasks/{id}", s.getHarvestTask)
 	mux.HandleFunc("PATCH /api/collect/tasks/{id}", s.patchHarvestTask)
 	mux.HandleFunc("DELETE /api/collect/tasks/{id}", s.deleteHarvestTask)
@@ -120,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/collect/options", s.collectOptions)
 	// 落库产出文件：列表 + 下载（Excel / JSON / JSONL / SQLite 都能下）
 	mux.HandleFunc("GET /api/collect/files", s.listHarvestFiles)
+	mux.HandleFunc("DELETE /api/collect/files", s.clearHarvestFiles)
 	mux.HandleFunc("GET /api/collect/files/{name}", s.downloadHarvestFile)
 
 	return cors(logRequests(mux))

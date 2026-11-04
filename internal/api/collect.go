@@ -856,6 +856,95 @@ func (s *Server) listHarvestFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "dir": dir})
 }
 
+/* ---------------------------------------------------------------- 清空数据 */
+
+// clearHarvestTasks DELETE /api/collect/tasks?all=1 —— 清空全部采集任务（连带运行记录）
+func (s *Server) clearHarvestTasks(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("all") != "1" {
+		writeErr(w, http.StatusBadRequest, "清空需要显式确认：DELETE /api/collect/tasks?all=1")
+		return
+	}
+	tasks, runs := s.DB.DeleteAllHarvestTasks()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted_tasks": tasks, "deleted_runs": runs,
+		"message": fmt.Sprintf("已清空 %d 个采集任务（连带 %d 条运行记录）", tasks, runs),
+	})
+}
+
+// clearHarvestFiles DELETE /api/collect/files?all=1 —— 删除 data/harvest 下的产出文件
+//
+// 就是"把采集到的数据删掉"：Excel / JSON / JSONL / SQLite 表格文件全删。
+// 正在被占用的文件（例如别人还用着 harvest.db）会跳过，并在 failed 里列出来。
+func (s *Server) clearHarvestFiles(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("all") != "1" {
+		writeErr(w, http.StatusBadRequest, "清空需要显式确认：DELETE /api/collect/files?all=1")
+		return
+	}
+	dir := filepath.Join(s.DB.Dir(), "harvest")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"deleted": 0, "freed_bytes": 0, "failed": []string{},
+			"message": "没有产出文件可删（目录不存在）",
+		})
+		return
+	}
+	deleted, freed := 0, int64(0)
+	failed := make([]string, 0, 4)
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		size := int64(0)
+		if info, ierr := e.Info(); ierr == nil {
+			size = info.Size()
+		}
+		if rerr := os.Remove(path); rerr != nil {
+			failed = append(failed, e.Name())
+			continue
+		}
+		deleted++
+		freed += size
+	}
+	msg := fmt.Sprintf("已删除 %d 个产出文件，释放 %s", deleted, humanBytes(freed))
+	if len(failed) > 0 {
+		msg += fmt.Sprintf("；%d 个文件被占用未删（%s）", len(failed), strings.Join(failed, "、"))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": deleted, "freed_bytes": freed, "failed": failed, "message": msg,
+	})
+}
+
+// clearCaptures DELETE /api/collect/captures?all=1 —— 丢弃全部录制结果（内存里的会话）
+func (s *Server) clearCaptures(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("all") != "1" {
+		writeErr(w, http.StatusBadRequest, "清空需要显式确认：DELETE /api/collect/captures?all=1")
+		return
+	}
+	n := s.Collect.Recorder.DiscardAll()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": n,
+		"message": fmt.Sprintf("已丢弃 %d 个录制结果（已建任务与已入库数据不受影响）", n),
+	})
+}
+
+// humanBytes 字节数转人可读（用于"释放了多少空间"这类提示）。
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	f := float64(n)
+	i := -1
+	for f >= unit && i < len(units)-1 {
+		f /= unit
+		i++
+	}
+	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
 // downloadHarvestFile GET /api/collect/files/{name} —— 下载产出文件
 func (s *Server) downloadHarvestFile(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))

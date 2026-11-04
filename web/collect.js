@@ -194,7 +194,8 @@
       fld('失败重试次数', numHtml(pfx + '_retries', th.retries || 0, 'min="0" max="5"')) +
       fld('退避基数 ms', numHtml(pfx + '_backoff', th.backoff_ms || 1500)) +
       fld('连续失败熔断', numHtml(pfx + '_maxfail', th.max_fail_streak || 3, 'min="1"')) +
-      fld('分页硬上限', numHtml(pfx + '_maxpages', th.max_pages_cap || 50, 'min="1" max="500"')) +
+      fld('分页默认上限', numHtml(pfx + '_maxpages', th.max_pages_cap || 50, 'min="1" max="2000"'),
+        '只在接口没填「最多页数」时生效；接口填了就以接口为准') +
       '</div></div>' +
       '<div class="ds-block"><div class="ds-block-title">写入数据库</div><div class="form-grid">' +
       fld('数据库类型', selectHtml(pfx + '_driver', driverOptions(), sink.driver)) +
@@ -289,21 +290,26 @@
     return '页码分页';
   }
 
+  /** "，最多 N 页" 片段；没填就是按任务默认上限 */
+  function pageLimitText(maxPages) {
+    return maxPages > 0 ? ('，最多 ' + maxPages + ' 页') : '，页数上限按任务默认值';
+  }
+
   function describePag(p) {
     var e = normalizePag(p);
     if (e.mode === 'none') return '不分页：只抓第一页';
     if (e.mode === 'cursor') {
       return '游标分页：' + (e.param || 'cursor') + '，下一页取自 ' + (e.next_path || '（响应里同名游标）') +
-        '，最多 ' + (e.max_pages || 50) + ' 页';
+        pageLimitText(e.max_pages);
     }
     if (e.mode === 'offset') {
       return '偏移分页：' + (e.param || 'offset') + '，从 ' + (e.start || 0) + ' 起每次 +' + (e.step || e.page_size || 1) +
-        '，最多 ' + (e.max_pages || 50) + ' 页';
+        pageLimitText(e.max_pages);
     }
     var s = '页码分页：' + (e.param || 'page') + (e.in === 'body' ? '（请求体）' : '');
     if (e.page_size) s += '，每页 ' + e.page_size + ' 条';
     if (e.total_path) s += '，总数取自 ' + e.total_path;
-    s += '，最多 ' + (e.max_pages || 50) + ' 页';
+    s += pageLimitText(e.max_pages);
     return s;
   }
 
@@ -371,7 +377,8 @@
     root.innerHTML = headHtml('接口采集',
       '在内置浏览器或你自己的浏览器（插件）里正常操作页面 → 录下真实请求 → 勾选要抓的接口 → 设定时间 → 自动抓取写入数据库。' +
       '采集默认单任务串行、带随机间隔抖动、遇到 401/403/429 立即停手，不对目标站点造成压力。',
-      '<button class="btn btn--sm" id="cap-refresh">刷新</button>') +
+      '<button class="btn btn--sm" id="cap-refresh">刷新</button>' +
+      '<button class="btn btn--sm btn--danger" id="cap-clear">清空数据</button>') +
       '<div class="card">' +
       '<div class="card-head"><h2>录制接口</h2>' +
       '<div class="card-tools"><span class="muted" id="cap-summary">加载中…</span></div></div>' +
@@ -393,6 +400,7 @@
       var t = e.target;
       if (!t || !t.closest) return;
       if (t.closest('#cap-refresh')) { refreshCaptures(root, st, true); loadTasks(root); renderFilesCard(root.querySelector('#files-card'), ''); return; }
+      if (t.closest('#cap-clear')) { openClearModal(root, st); return; }
       if (t.closest('[data-files-refresh]')) { renderFilesCard(root.querySelector('#files-card'), ''); return; }
       if (t.closest('#cap-start')) { startCapture(root); return; }
       if (t.closest('#cap-stop')) { stopCapture(root, t.closest('#cap-stop').getAttribute('data-id')); return; }
@@ -515,6 +523,81 @@
     var saved = '';
     try { saved = lsRead(START_URL_KEY) || ''; } catch (e) { saved = ''; }
     return saved || defaultStartURL();
+  }
+
+  /* ---------------- 清空数据（任务 / 运行 / 产出文件 / 录制结果） ---------------- */
+
+  /**
+   * 清空采集数据：分四类，勾选后一起删。
+   * 服务端每个口子都要求 ?all=1，这里前端先弹一次确认框，避免误点。
+   */
+  function openClearModal(root, st) {
+    Promise.all([
+      api('GET', '/api/collect/tasks', undefined, { silent: true }).catch(function () { return { items: [] }; }),
+      api('GET', '/api/collect/files', undefined, { silent: true }).catch(function () { return { items: [] }; }),
+      api('GET', '/api/collect/captures', undefined, { silent: true }).catch(function () { return { items: [] }; })
+    ]).then(function (res) {
+      var taskCount = U().apiItems(res[0]).length;
+      var files = U().apiItems(res[1]);
+      var capCount = U().apiItems(res[2]).length;
+      var fileSize = files.reduce(function (n, f) { return n + (f.size || 0); }, 0);
+      var runHint = taskCount ? '（含这些任务的运行记录）' : '';
+
+      var body = '<div class="alert alert--warn" style="margin-bottom:12px">' +
+        '清空后不可恢复（数据快照只覆盖录制/设置，不覆盖采集任务）。想留证据的，先把产出文件下载下来。</div>' +
+        '<label class="check-line"><input type="checkbox" id="clr_files"> <b>产出文件</b>' +
+        '<span class="muted">　' + files.length + ' 个文件，' + fmtBytes(fileSize) + '（Excel / JSON / JSONL / SQLite 表格）</span></label>' +
+        '<label class="check-line"><input type="checkbox" id="clr_tasks"> <b>采集任务与运行记录</b>' +
+        '<span class="muted">　' + taskCount + ' 个任务' + runHint + '</span></label>' +
+        '<label class="check-line"><input type="checkbox" id="clr_runs"> <b>仅运行记录</b>' +
+        '<span class="muted">　保留任务配置，只删历史运行日志</span></label>' +
+        '<label class="check-line"><input type="checkbox" id="clr_caps"> <b>录制结果</b>' +
+        '<span class="muted">　' + capCount + ' 个会话（内存里的录制结果，已建任务不受影响）</span></label>';
+
+      var m = U().openModal({
+        title: '清空采集数据', width: 620, body: body,
+        footer: '<button class="btn" data-modal-close>取消</button>' +
+          '<button class="btn btn--danger" id="clr_go">清空选中项</button>'
+      });
+
+      m.overlay.querySelector('#clr_go').addEventListener('click', function () {
+        var pick = function (id) {
+          var el = m.overlay.querySelector('#' + id);
+          return !!(el && el.checked);
+        };
+        var want = [];
+        if (pick('clr_files')) want.push('产出文件（' + files.length + ' 个）');
+        if (pick('clr_tasks')) want.push('采集任务与运行记录（' + taskCount + ' 个任务）');
+        if (pick('clr_runs')) want.push('全部采集运行记录');
+        if (pick('clr_caps')) want.push('录制结果（' + capCount + ' 个会话）');
+        if (!want.length) { toast('先勾选要清空的内容', 'error'); return; }
+
+        U().confirmDialog({
+          title: '确认清空',
+          message: '将清空：' + want.join('、') + '。这个操作不可撤销，确定继续？',
+          confirmText: '确认清空'
+        }).then(function (ok) {
+          if (!ok) return;
+          var jobs = [];
+          if (pick('clr_files')) jobs.push(api('DELETE', '/api/collect/files?all=1', undefined, { silent: true }));
+          if (pick('clr_tasks')) jobs.push(api('DELETE', '/api/collect/tasks?all=1', undefined, { silent: true }));
+          if (pick('clr_runs')) jobs.push(api('DELETE', '/api/collect/runs?all=1', undefined, { silent: true }));
+          if (pick('clr_caps')) jobs.push(api('DELETE', '/api/collect/captures?all=1', undefined, { silent: true }));
+          Promise.all(jobs).then(function (outs) {
+            var msgs = outs.map(function (o) { return (o && o.message) || ''; }).filter(Boolean);
+            toast(msgs.length ? msgs.join('；') : '已清空', 'success');
+            m.close();
+            refreshCaptures(root, st, true);
+            loadTasks(root);
+            renderFilesCard(root.querySelector('#files-card'), '');
+          }).catch(function (err) {
+            toast((err && err.message) || '清空失败', 'error');
+          });
+        });
+      });
+    }).catch(function (err) {
+      toast((err && err.message) || '读取清空范围失败', 'error');
+    });
   }
 
   function defaultStartURL() {
@@ -1109,7 +1192,8 @@
         fld('参数名', inputHtml('ep_pparam_' + ep.id, pg.param, 'placeholder="page / offset / cursor"')) +
         fld('参数位置', selectHtml('ep_pin_' + ep.id, [['query', 'URL 参数'], ['body', '请求体 JSON']], pg.in)) +
         fld('每页条数', numHtml('ep_psize_' + ep.id, pg.page_size, 'min="0" placeholder="自动"')) +
-        fld('最多页数', numHtml('ep_pmax_' + ep.id, pg.max_pages, 'min="1"')) +
+        fld('最多页数', numHtml('ep_pmax_' + ep.id, pg.max_pages, 'min="1" max="2000"'),
+          '填了就以你填的为准（硬顶 2000）；留空则用任务的「分页默认上限」') +
         fld('起始值', numHtml('ep_pstart_' + ep.id, pg.start, 'min="0"')) +
         '</div>' +
         '<div class="form-grid">' +
@@ -1213,7 +1297,7 @@
             in: val(root, 'ep_pin_' + ep.id) || 'query',
             start: numVal(root, 'ep_pstart_' + ep.id, 0),
             page_size: numVal(root, 'ep_psize_' + ep.id, 0),
-            max_pages: numVal(root, 'ep_pmax_' + ep.id, 50),
+            max_pages: numVal(root, 'ep_pmax_' + ep.id, 0),
             total_path: val(root, 'ep_ptotal_' + ep.id).trim(),
             has_more_path: val(root, 'ep_pmore_' + ep.id).trim(),
             next_path: val(root, 'ep_pnext_' + ep.id).trim(),

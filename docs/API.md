@@ -245,7 +245,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `name` / `description` / `start_url` | 元信息 |
 | `endpoints[]` | 接口定义，见下 |
 | `schedule` | `{mode: interval\|daily\|manual, every_seconds, times:["09:00"], weekdays:[1,3,5], jitter_percent}` |
-| `throttle` | `{min_interval_ms, jitter_percent, timeout_ms, retries, backoff_ms, max_fail_streak, max_pages_cap}` |
+| `throttle` | `{min_interval_ms, jitter_percent, timeout_ms, retries, backoff_ms, max_fail_streak, max_pages_cap}`；`max_pages_cap` 是**分页默认上限**，只在接口 `max_pages` 留空时生效 |
 | `sink` | `{driver: sqlite\|mysql\|postgres\|xlsx\|json\|jsonl, dsn, table, mode: append\|upsert, key_column, batch_size}` |
 | `session` | `{mode: browser\|cookie\|none, cookie, user_agent, referer, host}` |
 | `status` | `active` / `paused` |
@@ -271,7 +271,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `param` / `in` | 参数名（`page`/`offset`/`cursor`）与位置（`query` 或 `body`） |
 | `start` / `step` | 起始值 / 递增量（offset 默认 = `page_size`） |
 | `page_size` / `size_param` | 每页条数 / 每页条数参数名（探测用） |
-| `max_pages` | 最多翻几页（默认 50，受 `throttle.max_pages_cap` 约束） |
+| `max_pages` | 最多翻几页。填了就以填的为准（硬顶 2000）；留空（0）用任务的 `max_pages_cap` |
 | `total_path` | 总数路径（如 `data.total`），有它即可精确算总页数 |
 | `has_more_path` | 是否还有下一页（如 `data.has_more`） |
 | `next_path` | 游标模式下下一页游标位置（如 `data.next_cursor`） |
@@ -333,6 +333,15 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | GET | `/api/collect/options` | 下拉选项与默认值（`drivers` / `session_modes` / `defaults`） |
 | GET | `/api/collect/files` | `data/harvest/` 产出文件：`{items:[{name, size, modified, kind: xlsx\|json\|jsonl\|db\|other, download}], dir}` |
 | GET | `/api/collect/files/{name}` | 下载产出文件（`Content-Disposition: attachment`，只允许纯文件名） |
+
+**清空（都要求 `?all=1`，否则 400）**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| DELETE | `/api/collect/files?all=1` | 删除 `data/harvest/` 下全部产出文件 → `{deleted, freed_bytes, failed[], message}`（被占用的文件跳过并列在 `failed`） |
+| DELETE | `/api/collect/tasks?all=1` | 清空全部采集任务（连带运行记录）→ `{deleted_tasks, deleted_runs, message}` |
+| DELETE | `/api/collect/runs?all=1` | 清空采集运行记录（任务保留） |
+| DELETE | `/api/collect/captures?all=1` | 丢弃全部录制结果（内存会话 + 内置浏览器标签页）→ `{deleted, message}` |
 
 ### 5.3 建任务示例
 
