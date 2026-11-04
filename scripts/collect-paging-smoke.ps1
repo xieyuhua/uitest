@@ -110,6 +110,28 @@ try {
   $d = RunTask $task.id
   Check "A 自动识别" $d $expectTotal | Out-Null
 
+  # ---------- 场景 A2：最多页数不被任务的默认上限压回去 ----------
+  Write-Host "[2/7+] 场景 A2：接口填 500 页，任务默认上限 50 → 应保留 500" -ForegroundColor Cyan
+  $tA2 = NewTask "A2 maxpages" @(@{
+    id = "ep_a2"; name = "pagemax"; method = "GET"; enabled = $true
+    url = "$base/demo/api/goods?page=1&size=5"; records_path = "data.list"
+    pagination = @{ mode = "page"; param = "page"; in = "query"; start = 1; page_size = 5; max_pages = 500; total_path = "data.total"; stop_on_short = $true }
+    fields = @(@{ column = "id"; path = "id" }, @{ column = "name"; path = "name" })
+  }) 50
+  $gotMax = $tA2.endpoints[0].pagination.max_pages
+  Write-Host ("        接口最多页数 = {0}（任务默认上限 50）" -f $gotMax) -ForegroundColor DarkGray
+  if ($gotMax -ne 500) { Fail "最多页数 500 被压成了 $gotMax（应原样保留）" }
+  # 留空（0）时应回落到任务的默认上限
+  $tA3 = NewTask "A3 autocap" @(@{
+    id = "ep_a3"; name = "autocap"; method = "GET"; enabled = $true
+    url = "$base/demo/api/goods?page=1&size=5"; records_path = "data.list"
+    pagination = @{ mode = "page"; param = "page"; in = "query"; start = 1; page_size = 5; max_pages = 0; total_path = "data.total"; stop_on_short = $true }
+    fields = @(@{ column = "id"; path = "id" })
+  }) 120
+  $gotAuto = $tA3.endpoints[0].pagination.max_pages
+  Write-Host ("        留空时 = {0}（任务默认上限 120）" -f $gotAuto) -ForegroundColor DarkGray
+  if ($gotAuto -ne 120) { Fail "留空时应用任务默认上限 120，实际 $gotAuto" }
+
   # ---------- 场景 B：偏移分页 ----------
   Write-Host "[3/7] 场景 B：偏移分页 offset/limit" -ForegroundColor Cyan
   $tB = NewTask "B offset" @(@{
@@ -169,7 +191,7 @@ try {
   }
 
   Write-Host ""
-  Write-Host ("分页采集自检通过 ✅  5 种形态都能抓全（示例数据 {0} 条）" -f $expectTotal) -ForegroundColor Green
+  Write-Host ("分页采集自检通过 ✅  5 种形态都能抓全（示例数据 {0} 条）；最多页数按填写值生效" -f $expectTotal) -ForegroundColor Green
   Write-Host "  A 自动识别 / B 偏移 / C 游标 / D 请求体 / E 假分页防护"
   Write-Host ""
   exit 0

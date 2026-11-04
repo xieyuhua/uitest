@@ -111,7 +111,7 @@ try {
   if ($xb.Length -lt 1000) { Fail "下载的 xlsx 太小（$($xb.Length) 字节）" }
   if (-not ($xb[0] -eq 0x50 -and $xb[1] -eq 0x4B)) { Fail "下载的 xlsx 不是 zip（Excel 打不开）" }
 
-  Write-Host "[5/5] 校验内容行数…" -ForegroundColor Cyan
+  Write-Host "[5/6] 校验内容行数…" -ForegroundColor Cyan
   $jsonText = [System.IO.File]::ReadAllText((Join-Path $dl "goods_json.json"), [Text.Encoding]::UTF8)
   $rows = $jsonText | ConvertFrom-Json
   if ($rows.Count -ne $expect) { Fail "json 里 $($rows.Count) 条，期望 $expect（upsert 可能失效）" }
@@ -152,8 +152,25 @@ print("XLSX_LAST_ID=%s" % ws.cell(row=ws.max_row, column=2).value)
     Write-Host "        （没找到 python/openpyxl，跳过 xlsx 行数直查；zip 头已校验）" -ForegroundColor DarkGray
   }
 
+  # ---------- 6. 清空数据 ----------
+  Write-Host "[6/6] 清空数据（产出文件 / 任务 / 运行记录）…" -ForegroundColor Cyan
+  try { $null = Send DELETE "/api/collect/files" } catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 400) { Fail "清空文件不带 all=1 应返回 400" }
+    Write-Host "        未带 all=1 → 400（符合预期）" -ForegroundColor DarkGray
+  }
+  $c1 = Send DELETE "/api/collect/files?all=1"
+  Write-Host ("        清空产出文件：{0}" -f $c1.message) -ForegroundColor DarkGray
+  if ($c1.deleted -lt 2) { Fail "应至少删掉 2 个产出文件，实际 $($c1.deleted)" }
+  $left = (Send GET "/api/collect/files").items
+  if ($left.Count -ne 0) { Fail "清空后还剩下 $($left.Count) 个文件" }
+
+  $c2 = Send DELETE "/api/collect/tasks?all=1"
+  Write-Host ("        清空任务：{0}" -f $c2.message) -ForegroundColor DarkGray
+  if ((Send GET "/api/collect/tasks").items.Count -ne 0) { Fail "清空后还有采集任务" }
+  if ((Send GET "/api/collect/runs").items.Count -ne 0) { Fail "清空任务后应连带清掉运行记录" }
+
   Write-Host ""
-  Write-Host ("文件落库自检通过 ✅  Excel + JSON 各 {0} 条，均可下载" -f $expect) -ForegroundColor Green
+  Write-Host ("文件落库自检通过 ✅  Excel + JSON 各 {0} 条，均可下载；清空数据可用" -f $expect) -ForegroundColor Green
   Write-Host ("  文件目录：{0}" -f (Join-Path $dataDir "harvest"))
   Write-Host ""
   exit 0

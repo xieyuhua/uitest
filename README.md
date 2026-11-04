@@ -83,6 +83,7 @@ go build -o uitest-server.exe .      # 依赖全是纯 Go（含 SQLite/MySQL/PG 
 | 自动识别结构 | 自动找记录数组（`data.list`）、推断字段映射（`owner.name → owner_name`），可手改 |
 | 自动翻页 | 页码 / 偏移 / 游标 / 请求体内参数四种形态；按总数·has_more·短页停；连两页相同即判"不吃分页"，重复行去重 |
 | 落库 6 种 | SQLite、MySQL、PostgreSQL、**Excel `.xlsx`**、**JSON `.json`**、JSONL；前两类文件可在控制台直接下载 |
+| 一键清空 | 首页「清空数据」可分别清掉产出文件 / 采集任务与运行记录 / 仅运行记录 / 内存里的录制结果 |
 | 自动建表补列 | 表不存在自动建，响应多字段自动 `ALTER TABLE ADD COLUMN`；`upsert` 按主键覆盖 |
 | 礼貌采集 | 单任务串行 + 最小间隔 + 随机抖动 + 指数退避；429 按 `Retry-After` 等；401/403 立即停手；连续失败熔断 |
 | 先看再写 | 「试抓预览」不写库看列与前几行；「测试落库」只验连接 |
