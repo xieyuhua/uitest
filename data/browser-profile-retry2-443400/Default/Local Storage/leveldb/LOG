@@ -1,5 +1,0 @@
-2026/10/22-16:15:01.077 29e4 Creating DB E:\workspace\kefu\uitest\data\browser-profile-retry2-443400\Default\Local Storage\leveldb since it was missing.
-2026/10/22-16:15:01.200 29e4 Reusing MANIFEST E:\workspace\kefu\uitest\data\browser-profile-retry2-443400\Default\Local Storage\leveldb/MANIFEST-000001
-2026/10/22-16:15:34.723 c228 Level-0 table #5: started
-2026/10/22-16:15:34.777 c228 Level-0 table #5: 287686 bytes OK
-2026/10/22-16:15:34.792 c228 Delete type=0 #3

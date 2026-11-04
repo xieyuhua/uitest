@@ -1,0 +1,17 @@
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "total": 6,
+    "page": 1,
+    "size": 20,
+    "list": [
+      { "id": 1001, "name": "云服务器 2 核 4G", "price": 99.5, "stock": 120, "status": "on", "tags": ["新客", "年付优惠"], "owner": { "id": 7, "name": "张三" } },
+      { "id": 1002, "name": "云服务器 4 核 8G", "price": 199, "stock": 86, "status": "on", "tags": ["热销"], "owner": { "id": 8, "name": "李四" } },
+      { "id": 1003, "name": "对象存储 100G", "price": 12.8, "stock": 999, "status": "on", "tags": [], "owner": { "id": 7, "name": "张三" } },
+      { "id": 1004, "name": "CDN 流量包 1T", "price": 88, "stock": 30, "status": "off", "tags": ["清仓"], "owner": { "id": 9, "name": "王五" } },
+      { "id": 1005, "name": "数据库 MySQL 2 核 4G", "price": 240, "stock": 15, "status": "on", "tags": ["新品"], "owner": { "id": 8, "name": "李四" } },
+      { "id": 1006, "name": "负载均衡 SLB", "price": 45, "stock": 200, "status": "on", "tags": [], "owner": { "id": 9, "name": "王五" } }
+    ]
+  }
+}

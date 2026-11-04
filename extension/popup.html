@@ -42,6 +42,23 @@
     </div>
   </section>
 
+  <!-- 接口录制开关 -->
+  <section class="card">
+    <label class="switch" for="netSwitch">
+      <input id="netSwitch" type="checkbox" checked>
+      <span class="switch-text">同时录制接口请求（可在控制台筛选 / 删除 / 建采集任务）</span>
+    </label>
+    <div class="row row-gap">
+      <span id="netMeta" class="meta">已录接口 0 条</span>
+      <button id="netOpenBtn" class="btn btn-ghost" type="button" disabled>查看录制结果</button>
+    </div>
+    <label class="switch" for="autoOpenSwitch">
+      <input id="autoOpenSwitch" type="checkbox" checked>
+      <span class="switch-text">停止录制后自动打开「录制结果」页</span>
+    </label>
+    <div class="hint">录的是你自己浏览器里真实发出的请求（fetch / XHR），登录态、插件、代理都不受影响。</div>
+  </section>
+
   <!-- 上一步备注 -->
   <section class="card">
     <label class="field-label" for="note">上一步备注</label>

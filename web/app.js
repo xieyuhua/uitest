@@ -522,6 +522,28 @@
       setActiveNav('elements');
       title = '元素库';
       renderElements(app);
+    } else if (page === 'collect') {
+      // 接口采集：录制 → 筛选 → 建任务 → 定时抓取 → 落库（实现在 collect.js）
+      setActiveNav('collect');
+      var csub = (parts[1] || '').toLowerCase();
+      var cid = parts[2] ? decodeURIComponent(parts[2]) : '';
+      var C = window.UITestCollect;
+      if (!C) {
+        title = '接口采集';
+        pageRoot(app).innerHTML = errorCard('collect.js 未加载，请刷新页面');
+      } else if (csub === 'capture' && cid) {
+        title = '接口录制结果';
+        C.renderCapture(app, cid);
+      } else if (csub === 'task' && cid) {
+        title = '采集任务';
+        C.renderTask(app, cid);
+      } else if (csub === 'run' && cid) {
+        title = '采集运行';
+        C.renderRun(app, cid);
+      } else {
+        title = '接口采集';
+        C.renderList(app);
+      }
     } else if (page === 'settings') {
       setActiveNav('settings');
       // 设置拆成独立子菜单页：#/settings/ai|browser|assist|backups|help
@@ -3381,6 +3403,36 @@
   /* ======================================================================
    * 启动
    * ====================================================================== */
+
+  // 把控制台的通用能力暴露给 collect.js（接口采集页复用同一套接口封装/弹窗/分页）
+  window.UITest = {
+    api: api,
+    toast: toast,
+    esc: esc,
+    openModal: openModal,
+    confirmDialog: confirmDialog,
+    emptyCard: emptyCard,
+    loadingCard: loadingCard,
+    errorCard: errorCard,
+    field: field,
+    fmtDateTime: fmtDateTime,
+    fmtTime: fmtTime,
+    fmtClock: fmtClock,
+    relTime: relTime,
+    fmtDuration: fmtDuration,
+    tagChips: tagChips,
+    parseTags: parseTags,
+    apiItems: apiItems,
+    levelClass: levelClass,
+    addCleanup: addCleanup,
+    navigate: navigate,
+    pageSize: pageSize,
+    setPageSize: setPageSize,
+    paginate: paginate,
+    pagerHtml: pagerHtml,
+    lsRead: lsRead,
+    lsWrite: lsWrite
+  };
 
   function boot() {
     bindHealthControls();

@@ -39,15 +39,22 @@
     stepCount: 0,
     lastStepId: '',
     lastStepAnnotation: '',
+    netEnabled: true,
+    captureId: '',
+    netCount: 0,
     recent: []
   };
   var selfTabId = null;         // 本框架所在标签页 id（由 background 告知）
   var recordingHere = false;    // 当前页是否就是录制标签页
   var localStepCount = 0;       // 本地步数（浮层显示用）
+  var localNetCount = 0;        // 本地已上报接口数（浮层显示用）
+  var netOn = false;            // 是否已把页面侧钩子打开
   var overlay = null;           // 浮层对象 {host, shadow, label, err, stop}
   var inputTimers = new WeakMap(); // 元素 -> 防抖定时器
   var boundKeys = new Set();    // 已上报元素登记的 key，本地去重
   var listenersBound = false;
+  var NET_SOURCE = 'uitest-nethook';   // 页面侧钩子 -> content 的消息标记
+  var NET_CTL = 'uitest-netctl';       // content -> 页面侧钩子的开关标记
 
   /* ---------------- 通用小工具 ---------------- */
 
@@ -64,6 +71,9 @@
       stepCount: Number(s.stepCount) || 0,
       lastStepId: String(s.lastStepId || ''),
       lastStepAnnotation: String(s.lastStepAnnotation || ''),
+      netEnabled: s.netEnabled !== false,
+      captureId: String(s.captureId || ''),
+      netCount: Number(s.netCount) || 0,
       recent: Array.isArray(s.recent) ? s.recent : []
     };
   }
@@ -107,9 +117,17 @@
     if (!next) return;
     state = normalizeState(next);
     localStepCount = state.stepCount;
+    localNetCount = state.netCount;
 
     var wasHere = recordingHere;
     recordingHere = !!(state.active && selfTabId !== null && state.tabId === selfTabId);
+
+    // 接口录制开关：录制中 + 本标签页 + 插件里勾了"同时录制接口请求"
+    var wantNet = recordingHere && state.netEnabled === true && !!state.captureId;
+    if (wantNet !== netOn) {
+      netOn = wantNet;
+      sendNetControl();
+    }
 
     if (recordingHere) {
       ensureOverlay();
@@ -118,6 +136,46 @@
       removeOverlay();
     }
   }
+
+  /* ---------------- 接口录制：页面钩子 ↔ background 的桥 ---------------- */
+
+  /** 不录平台自己的接口（否则一边录一边刷自己的 /api/collect 很吵） */
+  function netSkipPrefixes() {
+    var list = ['chrome-extension://'];
+    try {
+      var u = new URL(state.serverUrl);
+      list.push(u.origin + '/api/');
+    } catch (e) { /* 忽略 */ }
+    return list;
+  }
+
+  /** 把开关状态推给页面侧钩子（钩子还没注入时这条消息没人听，属正常） */
+  function sendNetControl() {
+    try {
+      window.postMessage({
+        source: NET_CTL,
+        enable: netOn === true,
+        skipPrefixes: netSkipPrefixes()
+      }, '*');
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /** 页面钩子抓到的请求：本地计数 + 交给 background 上报 */
+  function onNetMessage(ev) {
+    var d = ev.data;
+    if (!d || d.source !== NET_SOURCE) return;
+    if (ev.source && ev.source !== window) return;
+    if (d.type === 'ready') { sendNetControl(); return; }
+    if (d.type !== 'request' || !d.item) return;
+    if (!recordingHere || !netOn) return;      // 状态可能刚变，双保险
+    localNetCount++;
+    renderOverlay();
+    sendMessage({ type: 'net', item: d.item }, function (resp, err) {
+      if (err) return;                          // 扩展重载等瞬时错误，静默
+      if (resp && resp.ok === false) showOverlayError(resp.error || '接口上报失败');
+    });
+  }
+  window.addEventListener('message', onNetMessage, false);
 
   /* ---------------- 浮层（Shadow DOM，右下角） ---------------- */
 
@@ -196,7 +254,8 @@
       ov.label.textContent = '录制运行库 uitest-keys.js 未加载，请重新加载扩展';
       return;
     }
-    ov.label.textContent = '● 录制中 · ' + localStepCount + ' 步';
+    ov.label.textContent = '● 录制中 · ' + localStepCount + ' 步' +
+      (netOn ? (' · ' + localNetCount + ' 接口') : '');
     ov.host.title = state.recordingName ? ('录制：' + state.recordingName) : '';
   }
 

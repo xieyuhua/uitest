@@ -69,10 +69,7 @@ code, .mono{ font-family:var(--mono); font-size:12.5px; }
 .nowrap{ white-space:nowrap; }
 .num{ text-align:right; }
 .hidden{ display:none !important; }
-.sr-only{
-  position:absolute; width:1px; height:1px; padding:0; margin:-1px;
-  overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0;
-}
+
 
 /* -------- 2. 顶部导航 -------- */
 .topbar{
@@ -200,7 +197,7 @@ code, .mono{ font-family:var(--mono); font-size:12.5px; }
 /* 表单 */
 .field{ display:flex; flex-direction:column; gap:5px; margin-bottom:14px; }
 .field:last-child{ margin-bottom:0; }
-.field-label, .field > label{
+.field > label{
   font-size:12.5px; font-weight:600; color:var(--text-2);
 }
 .field-hint{ font-size:11.5px; color:var(--text-3); }
@@ -337,19 +334,9 @@ select.input{ appearance:auto; }
 @keyframes spin{ to{ transform:rotate(360deg); } }
 
 .empty{ padding:34px 20px; text-align:center; color:var(--text-3); }
-.empty--sm{ padding:22px 16px; }
 .empty-title{ font-size:14px; font-weight:600; color:var(--text-2); margin-bottom:6px; }
 .empty p{ font-size:12.5px; line-height:1.7; max-width:520px; margin:0 auto; }
 .empty-actions{ margin-top:14px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
-
-/* 骨架 */
-.skeleton{
-  height:12px; border-radius:6px;
-  background:linear-gradient(90deg, #eef0f5 25%, #f7f8fc 37%, #eef0f5 63%);
-  background-size:400% 100%;
-  animation:shimmer 1.3s ease infinite;
-}
-@keyframes shimmer{ 0%{ background-position:100% 50%; } 100%{ background-position:0 50%; } }
 
 /* -------- 6. 录制详情：头部 + 步骤表 -------- */
 .rec-head .rec-head-row{
@@ -565,11 +552,7 @@ select.input{ appearance:auto; }
 @keyframes toastOut{ to{ opacity:0; transform:translateY(6px); } }
 
 /* 设置页 */
-.settings-grid{
-  display:grid; gap:16px;
-  grid-template-columns:minmax(0, 1fr) minmax(0, 1fr);
-  align-items:start;
-}
+
 .form-row{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; }
 .steps-list{ margin:0; padding-left:0; list-style:none; counter-reset:step; }
 .steps-list li{
@@ -594,7 +577,7 @@ select.input{ appearance:auto; }
   .detail-grid{ grid-template-columns:minmax(0, 1fr) 330px; }
 }
 @media (max-width: 1080px){
-  .split, .detail-grid, .settings-grid{ grid-template-columns:minmax(0, 1fr); }
+  .split, .detail-grid{ grid-template-columns:minmax(0, 1fr); }
   .logs-wrap{ height:280px; }
 }
 @media (max-width: 860px){
@@ -632,7 +615,6 @@ select.input{ appearance:auto; }
 }
 
 /* 通用显隐（诊断输出区等） */
-.is-hidden{ display:none !important; }
 
 
 /* ---------------------------------------------------------------
@@ -747,3 +729,44 @@ tbody tr.is-selected{ background:#f5f5ff; }
 .pager-btns{ display:flex; align-items:center; gap:5px; margin-left:auto; flex-wrap:wrap; }
 .pager-btns .btn{ min-width:34px; padding:5px 9px; font-size:12.5px; }
 .btn--danger:disabled{ opacity:.5; cursor:not-allowed; }
+
+/* ---------------------------------------------------------------
+   接口采集（录制 → 筛选 → 定时 → 落库）
+   --------------------------------------------------------------- */
+.filter-bar{ display:flex; flex-wrap:wrap; gap:8px 12px; align-items:flex-end; margin-bottom:12px; }
+.filter-bar .field{ margin-bottom:0; min-width:132px; }
+.filter-bar .field > label{ font-size:11.5px; }
+.sel-bar{
+  position:sticky; bottom:12px; z-index:6; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+  background:#fff; border:1px solid var(--border); border-radius:10px; padding:10px 14px;
+  box-shadow:0 8px 28px rgba(16,24,40,.12); margin-top:14px;
+}
+.sel-bar .grow{ flex:1 1 200px; font-size:12.5px; color:var(--text-2); }
+.url-cell{ font-family:var(--mono); font-size:11.5px; word-break:break-all; max-width:520px; }
+.mono{ font-family:var(--mono); }
+.ep-block{ border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px; background:#fff; }
+.ep-block:hover{ border-color:#c8cddb; }
+.ep-head{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+.ep-head .ep-idx{ font-family:var(--mono); font-size:11.5px; color:var(--text-3); }
+.ep-pager{ margin:10px 0 6px; padding:10px 12px; border:1px dashed var(--border); border-radius:10px; background:#fafbff; }
+.ep-pager-head{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; font-size:12.5px; }
+.ep-pager-head b{ font-size:12.5px; }
+.ep-pager-head .btn{ margin-left:auto; }
+.ep-chev{
+  width:22px; height:22px; flex:0 0 22px; display:inline-flex; align-items:center; justify-content:center;
+  border:1px solid var(--border); border-radius:6px; background:#fff; color:var(--text-2);
+  font-size:12px; line-height:1; cursor:pointer; padding:0;
+}
+.ep-chev:hover{ background:#f0f2f9; color:var(--text); }
+.ep-summary{ font-size:11.5px; color:var(--text-3); white-space:nowrap; }
+.ep-body{ display:block; }
+.ep-block:not(.is-open) .ep-body{ display:none; }
+.ep-block:not(.is-open){ padding-bottom:10px; }
+.chips{ display:flex; flex-wrap:wrap; gap:4px; }
+.form-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(168px, 1fr)); gap:0 12px; }
+.stat-line{ display:flex; gap:20px; flex-wrap:wrap; font-size:12px; color:var(--text-3); margin-bottom:12px; }
+.stat-line b{ display:block; color:var(--text); font-size:15px; font-weight:600; margin-top:1px; }
+.cap-banner{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px;
+}

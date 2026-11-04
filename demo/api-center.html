@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接口示例页 · 分页列表</title>
+<style>
+  :root { --border:#e6e8f0; --text:#1f2430; --muted:#6b7280; --primary:#4f46e5; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color:var(--text); background:#f7f8fc; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:12.5px; margin-bottom:16px; }
+  .card { background:#fff; border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 10px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  button { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:#fff; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  input, select { font:inherit; padding:6px 10px; border:1px solid var(--border); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; background:#eef2ff; color:var(--primary); font-size:11.5px; margin-right:4px; }
+  .state { padding:1px 8px; border-radius:999px; font-size:11.5px; }
+  .state.on { background:#dcfce7; color:#15803d; }
+  .state.off { background:#f2f4f9; color:#6b7280; }
+  .log { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:var(--muted); max-height:150px; overflow:auto; white-space:pre-wrap; }
+  .hint { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:8px; padding:10px 12px; font-size:12.5px; margin-bottom:16px; line-height:1.8; }
+  .pager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; font-size:12.5px; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>接口示例页 · 分页列表</h1>
+<div class="sub">给「接口采集」演练"自动抓分页"用：固定 23 条数据，四种常见分页形态都能在这里点出来。</div>
+
+<div class="hint">
+  <b>演练步骤</b>：控制台「接口采集 → 录制接口」填本页地址 → 在这个标签页点「下一页」翻两三页（并点一下「游标翻页」）→ 停止录制
+  → 勾选 <code>GET /demo/api/goods</code> → 任务详情里分页应该已经被识别成 <code>page / size=3 / total=data.total</code>
+  → 立即运行 → 应该正好抓全 <b>23 条</b>。
+</div>
+
+<div class="card">
+  <h2>① 页码分页 <span class="tag">/demo/api/goods?page=&amp;size=</span></h2>
+  <div class="bar">
+    <label>每页 <select id="size"><option>3</option><option>5</option><option>10</option></select></label>
+    <button id="prev">上一页</button>
+    <button class="primary" id="next">下一页</button>
+    <button id="jump8">跳到最后一页</button>
+    <span class="pager" id="pageinfo">加载中…</span>
+  </div>
+  <table>
+    <thead><tr><th>ID</th><th>名称</th><th>价格</th><th>库存</th><th>状态</th><th>负责人</th><th>标签</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="7" style="color:#6b7280">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>② 偏移分页 <span class="tag">/demo/api/goods-offset?offset=&amp;limit=</span></h2>
+  <div class="bar">
+    <button id="off-next">取下一段</button>
+    <span class="pager" id="offinfo">offset=0</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>③ 游标分页 <span class="tag">/demo/api/goods-cursor?cursor=&amp;limit=</span></h2>
+  <div class="bar">
+    <button id="cur-next">取下一页</button>
+    <span class="pager" id="curinfo">cursor 未开始</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>④ 分页参数在请求体里 <span class="tag">POST /demo/api/goods {page,size}</span></h2>
+  <div class="bar">
+    <button id="body-next">取下一页</button>
+    <span class="pager" id="bodyinfo">page=1</span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="font-weight:600; margin-bottom:6px;">请求日志</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+  var logEl = document.getElementById('log');
+  function log(msg) {
+    logEl.textContent = new Date().toLocaleTimeString() + '  ' + msg + '\n' + logEl.textContent;
+  }
+
+  function esc(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function render(list) {
+    var host = document.getElementById('rows');
+    if (!list || !list.length) {
+      host.innerHTML = '<tr><td colspan="7" style="color:#6b7280">没有数据（已经到最后一页）</td></tr>';
+      return;
+    }
+    host.innerHTML = list.map(function (it) {
+      return '<tr>' +
+        '<td>' + esc(it.id) + '</td>' +
+        '<td>' + esc(it.name) + '</td>' +
+        '<td>￥' + esc(it.price) + '</td>' +
+        '<td>' + esc(it.stock) + '</td>' +
+        '<td><span class="state ' + (it.status === 'on' ? 'on' : 'off') + '">' + (it.status === 'on' ? '在售' : '下架') + '</span></td>' +
+        '<td>' + esc(it.owner && it.owner.name) + '</td>' +
+        '<td>' + (it.tags || []).map(function (t) { return '<span class="tag">' + esc(t) + '</span>'; }).join('') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  /* ① 页码分页 */
+  var state = { page: 1, size: 3, pages: 1, total: 0 };
+
+  function loadPage(page) {
+    var size = parseInt(document.getElementById('size').value, 10) || 3;
+    var url = '/demo/api/goods?page=' + page + '&size=' + size;
+    log('GET ' + url);
+    return fetch(url, { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        var d = res.data || {};
+        state.page = d.page || page;
+        state.size = d.size || size;
+        state.pages = d.pages || 1;
+        state.total = d.total || 0;
+        render(d.list || []);
+        document.getElementById('pageinfo').textContent =
+          '第 ' + state.page + '/' + state.pages + ' 页 · 共 ' + state.total + ' 条';
+        document.getElementById('prev').disabled = state.page <= 1;
+        document.getElementById('next').disabled = state.page >= state.pages;
+        log('← 200 本页 ' + (d.list || []).length + ' 条');
+      });
+  }
+
+  document.getElementById('next').addEventListener('click', function () { loadPage(state.page + 1); });
+  document.getElementById('prev').addEventListener('click', function () { loadPage(Math.max(1, state.page - 1)); });
+  document.getElementById('size').addEventListener('change', function () { loadPage(1); });
+  document.getElementById('jump8').addEventListener('click', function () { loadPage(state.pages || 8); });
+
+  /* ② 偏移分页 */
+  var offsetState = { offset: 0 };
+  document.getElementById('off-next').addEventListener('click', function () {
+    var limit = 5;
+    var url = '/demo/api/goods-offset?offset=' + offsetState.offset + '&limit=' + limit;
+    log('GET ' + url);
+    fetch(url).then(function (r) { return r.json(); }).then(function (res) {
+      var d = res.data || {};
+      var list = d.list || [];
+      render(list);
+      document.getElementById('offinfo').textContent =
+        'offset=' + offsetState.offset + ' · 本段 ' + list.length + ' 条 / 共 ' + (d.total || 0) + ' 条';
+      if (list.length) offsetState.offset += list.length;
+    });
+  });
+
+  /* ③ 游标分页 */
+  var cursorState = { cursor: 0 };
+  document.getElementById('cur-next').addEventListener('click', function () {
+    var url = '/demo/api/goods-cursor?cursor=' + cursorState.cursor + '&limit=5';
+    log('GET ' + url);
+    fetch(url).then(function (r) { return r.json(); }).then(function (res) {
+      var d = res.data || {};
+      var list = d.list || [];
+      render(list);
+      document.getElementById('curinfo').textContent =
+        'cursor=' + cursorState.cursor + ' · 本页 ' + list.length + ' 条 · next=' + (d.next_cursor || '(无)') +
+        (d.has_more ? ' · 还有更多' : ' · 已到末尾');
+      cursorState.cursor = d.next_cursor || 0;
+    });
+  });
+
+  /* ④ 分页参数在请求体 */
+  var bodyState = { page: 1 };
+  document.getElementById('body-next').addEventListener('click', function () {
+    log('POST /demo/api/goods body={"page":' + bodyState.page + ',"size":5}');
+    fetch('/demo/api/goods', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page: bodyState.page, size: 5 })
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      var d = res.data || {};
+      var list = d.list || [];
+      render(list);
+      document.getElementById('bodyinfo').textContent =
+        'page=' + bodyState.page + '/' + (d.pages || 1) + ' · 本页 ' + list.length + ' 条';
+      bodyState.page = bodyState.page + 1;
+    });
+  });
+
+  loadPage(1);
+</script>
+</body>
+</html>

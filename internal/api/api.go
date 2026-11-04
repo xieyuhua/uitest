@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"uitest-server/internal/browser"
 	"uitest-server/internal/bus"
+	"uitest-server/internal/collect"
 	"uitest-server/internal/engine"
 	"uitest-server/internal/store"
 )
@@ -23,14 +25,15 @@ type Server struct {
 	BR        *browser.Manager
 	Runner    *engine.Runner
 	Bus       *bus.Bus
+	Collect   *collect.Service
 	Version   string
 	Port      int
 	StartedAt time.Time
 }
 
 // New 构造 API 服务。
-func New(db *store.DB, br *browser.Manager, runner *engine.Runner, b *bus.Bus, version string, port int) *Server {
-	return &Server{DB: db, BR: br, Runner: runner, Bus: b, Version: version, Port: port, StartedAt: time.Now()}
+func New(db *store.DB, br *browser.Manager, runner *engine.Runner, b *bus.Bus, cs *collect.Service, version string, port int) *Server {
+	return &Server{DB: db, BR: br, Runner: runner, Bus: b, Collect: cs, Version: version, Port: port, StartedAt: time.Now()}
 }
 
 // Handler 返回挂好全部接口的处理器。
@@ -84,6 +87,40 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+
+	// ---- 接口采集：录制 → 筛选 → 建任务 → 定时 → 落库 ----
+	mux.HandleFunc("POST /api/collect/captures", s.startCapture)
+	mux.HandleFunc("GET /api/collect/captures", s.listCaptures)
+	mux.HandleFunc("GET /api/collect/captures/{id}", s.getCapture)
+	mux.HandleFunc("POST /api/collect/captures/{id}/stop", s.stopCapture)
+	mux.HandleFunc("POST /api/collect/captures/{id}/requests", s.addCaptureRequests)
+	mux.HandleFunc("DELETE /api/collect/captures/{id}/requests", s.deleteCaptureRequests)
+	mux.HandleFunc("POST /api/collect/captures/{id}/analyze", s.analyzeCapture)
+	mux.HandleFunc("DELETE /api/collect/captures/{id}", s.deleteCapture)
+	mux.HandleFunc("POST /api/collect/analyze", s.analyzeBody)
+
+	mux.HandleFunc("GET /api/collect/tasks", s.listHarvestTasks)
+	mux.HandleFunc("POST /api/collect/tasks", s.createHarvestTask)
+	mux.HandleFunc("GET /api/collect/tasks/{id}", s.getHarvestTask)
+	mux.HandleFunc("PATCH /api/collect/tasks/{id}", s.patchHarvestTask)
+	mux.HandleFunc("DELETE /api/collect/tasks/{id}", s.deleteHarvestTask)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/run", s.runHarvestTask)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/preview", s.previewHarvestTask)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/analyze", s.analyzeHarvestEndpoint)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/detect-pagination", s.detectPagination)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/test-sink", s.testHarvestSink)
+
+	mux.HandleFunc("GET /api/collect/runs", s.listHarvestRuns)
+	mux.HandleFunc("GET /api/collect/runs/{id}", s.getHarvestRun)
+	mux.HandleFunc("POST /api/collect/runs/{id}/cancel", s.cancelHarvestRun)
+	mux.HandleFunc("GET /api/collect/runs/{id}/events", s.harvestRunEvents)
+	mux.HandleFunc("POST /api/collect/runs/batch-delete", s.batchDeleteHarvestRuns)
+	mux.HandleFunc("DELETE /api/collect/runs", s.clearHarvestRuns)
+
+	mux.HandleFunc("GET /api/collect/options", s.collectOptions)
+	// 落库产出文件：列表 + 下载（Excel / JSON / JSONL / SQLite 都能下）
+	mux.HandleFunc("GET /api/collect/files", s.listHarvestFiles)
+	mux.HandleFunc("GET /api/collect/files/{name}", s.downloadHarvestFile)
 
 	return cors(logRequests(mux))
 }
@@ -178,10 +215,19 @@ func readJSON(r *http.Request, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
+// timeoutCtx 给耗时接口（试抓预览等）加一个兜底超时。
+func timeoutCtx(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = 60 * time.Second
+	}
+	return context.WithTimeout(r.Context(), d)
+}
+
 /* ------------------------------------------------------------------ 健康 */
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	recs, runs := s.DB.Counts()
+	htasks, hruns := s.DB.HarvestCounts()
 	st := s.BR.Status()
 	assist := s.DB.Settings().Assist
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -190,6 +236,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"uptime_sec":      int(time.Since(s.StartedAt).Seconds()),
 		"recordings":      recs,
 		"runs":            runs,
+		"harvest_tasks":   htasks,
+		"harvest_runs":    hruns,
 		"browser_running": st.Running,
 		"port":            s.Port,
 		// 辅助能力开关：控制台据此决定是否显示"缺 testid"提醒等

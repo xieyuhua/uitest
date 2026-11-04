@@ -30,6 +30,11 @@ const DEFAULT_STATE = {
   stepCount: 0,
   lastStepId: '',
   lastStepAnnotation: '',
+  // ---- 接口录制（与 UI 录制同时进行）----
+  netEnabled: true,     // popup 里的开关：是否同时录接口
+  autoOpenCapture: true,// 停止录制后是否自动打开"录制结果"页（去勾选接口）
+  captureId: '',        // 服务端录制会话 id（/api/collect/captures）
+  netCount: 0,          // 已上报的接口条数
   recent: []
 };
 
@@ -85,6 +90,10 @@ function normalizeState(raw) {
   s.startUrl = String(s.startUrl || '');
   s.lastStepId = String(s.lastStepId || '');
   s.lastStepAnnotation = String(s.lastStepAnnotation || '');
+  s.netEnabled = s.netEnabled !== false;
+  s.autoOpenCapture = s.autoOpenCapture !== false;
+  s.captureId = String(s.captureId || '');
+  s.netCount = Number(s.netCount) || 0;
   s.active = s.active === true;
   if (typeof s.tabId !== 'number') s.tabId = null;
   s.recent = Array.isArray(src.recent)
@@ -225,6 +234,133 @@ async function handlePing() {
   return { ok: true, state, serverOk, health, error };
 }
 
+/* ---------------- 接口录制：上报缓冲 ---------------- */
+
+/**
+ * 页面钩子抓到的请求先攒在内存里再批量上报，避免每条一个 HTTP 请求。
+ * 注意：service worker 可能被回收，所以攒的数量很小、间隔很短，最多丢几条。
+ */
+let netBuf = [];
+let netFlushTimer = null;
+
+const NET_FLUSH_MS = 500;      // 攒 500ms 就发
+const NET_FLUSH_MAX = 20;      // 攒够 20 条立刻发
+const NET_BATCH = 50;          // 单次上报最多 50 条
+
+/** 清洗页面钩子上报的条目（只留协议字段，别把页面里的额外东西带进来） */
+function cleanNetItem(raw) {
+  const it = raw && typeof raw === 'object' ? raw : {};
+  const url = String(it.url || '');
+  if (!/^https?:\/\//i.test(url)) return null;
+  const out = {
+    id: String(it.id || '').slice(0, 64),
+    method: String(it.method || 'GET').toUpperCase().slice(0, 10),
+    url: url.slice(0, 4096),
+    status: Number(it.status) || 0,
+    type: String(it.type || 'XHR').slice(0, 16),
+    mime_type: String(it.mime_type || '').slice(0, 200),
+    bytes: Number(it.bytes) || 0,
+    duration_ms: Number(it.duration_ms) || 0,
+    page_url: String(it.page_url || '').slice(0, 2048),
+    has_body: it.has_body === true,
+    body_size: Number(it.body_size) || 0,
+    body_truncated: it.body_truncated === true,
+    body_preview: String(it.body_preview || '').slice(0, 256 * 1024),
+    post_data: String(it.post_data || '').slice(0, 64 * 1024),
+    error: String(it.error || '').slice(0, 300),
+    at: String(it.at || '')
+  };
+  const headers = it.req_headers && typeof it.req_headers === 'object' ? it.req_headers : null;
+  if (headers) {
+    const clean = {};
+    Object.keys(headers).slice(0, 60).forEach((k) => {
+      const v = String(headers[k] === undefined || headers[k] === null ? '' : headers[k]);
+      if (k && v) clean[String(k).slice(0, 120)] = v.slice(0, 2048);
+    });
+    if (Object.keys(clean).length) out.req_headers = clean;
+  }
+  return out;
+}
+
+/** 把缓冲里的条目发出去（失败就丢，不阻塞用户操作） */
+async function flushNet() {
+  if (netFlushTimer) { clearTimeout(netFlushTimer); netFlushTimer = null; }
+  if (!netBuf.length) return;
+  const state = await getState();
+  if (!state.captureId) { netBuf = []; return; }
+  const items = netBuf.splice(0, NET_BATCH);
+  try {
+    await api('/api/collect/captures/' + encodeURIComponent(state.captureId) + '/requests', 'POST', { items });
+  } catch (e) {
+    /* 服务端暂时不可用：这批就丢了，用户能在控制台看到条数少了 */
+  }
+  if (netBuf.length) scheduleFlush();
+}
+
+function scheduleFlush() {
+  if (netFlushTimer) return;
+  netFlushTimer = setTimeout(() => { netFlushTimer = null; flushNet().catch(() => {}); }, NET_FLUSH_MS);
+}
+
+/** net：页面钩子抓到一条请求 */
+async function handleNet(msg) {
+  const state = await getState();
+  if (!state.active || !state.captureId) return { ok: false, error: '当前没有进行中的接口录制' };
+  const item = cleanNetItem(msg && msg.item);
+  if (!item) return { ok: true, skipped: true };
+  netBuf.push(item);
+  state.netCount = (state.netCount || 0) + 1;
+  await saveState(state, state.tabId);
+  if (netBuf.length >= NET_FLUSH_MAX) flushNet().catch(() => {});
+  else scheduleFlush();
+  return { ok: true, count: state.netCount };
+}
+
+/** setNet：popup 里切换"是否同时录制接口"（下次开始录制生效，录制中也会即时开关） */
+async function handleSetNet(msg) {
+  const state = await getState();
+  state.netEnabled = msg.enabled === true;
+  await saveState(state, state.tabId);
+  return { ok: true, state };
+}
+
+/** setAutoOpen：切换"停止后自动打开录制结果页" */
+async function handleSetAutoOpen(msg) {
+  const state = await getState();
+  state.autoOpenCapture = msg.enabled === true;
+  await saveState(state, state.tabId);
+  return { ok: true, state };
+}
+
+/** 录制结果页地址（控制台里勾选接口 → 建采集任务） */
+function capturePageUrl(state) {
+  return state.serverUrl + '/#/collect/capture/' + encodeURIComponent(state.captureId);
+}
+
+/** 停止录制后自动打开结果页：用户不用再去控制台里翻 */
+async function openCapturePage(state) {
+  if (!state.captureId) return false;
+  try {
+    await chrome.tabs.create({ url: capturePageUrl(state), active: true });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 打开接口录制结果页（插件弹窗用） */
+async function handleOpenCapture() {
+  const state = await getState();
+  if (!state.captureId) return { ok: false, error: '这次录制没有接口会话（是不是把「同时录制接口请求」关掉了？）' };
+  await flushNet();
+  try {
+    await chrome.tabs.create({ url: capturePageUrl(state) });
+    return { ok: true, url: capturePageUrl(state) };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 /* ---------------- 内容脚本注入 ---------------- */
 
 /**
@@ -250,6 +386,35 @@ async function injectRecorder(tabId) {
   }
 }
 
+/**
+ * 注入页面侧网络钩子（MAIN world）。
+ *
+ * 为什么不用 content script：隔离世界看不到页面自己的 fetch/XHR，也没有响应体；
+ * 这里用 scripting + world:'MAIN' 把 net-hook.js 放到页面世界里，它再通过
+ * window.postMessage 把抓到的请求交给 content.js 转发上来。
+ * 幂等：脚本内部有 window.__uitestNetHook 守卫。
+ */
+async function injectNetHook(tabId) {
+  if (typeof tabId !== 'number') return { ok: false, error: '缺少 tabId' };
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'MAIN',
+      files: ['net-hook.js']
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+/** 同时注入"操作录制 + 接口录制"两套脚本 */
+async function injectAll(tabId) {
+  const recorder = await injectRecorder(tabId);
+  const net = await injectNetHook(tabId);
+  return { recorder, net };
+}
+
 /** 录制中把「当前活动标签页」切换为录制标签页（用户在别的标签页继续操作时不再丢步骤） */
 async function adoptTab(tabId, tab) {
   const state = await getState();
@@ -259,7 +424,7 @@ async function adoptTab(tabId, tab) {
   if (state.tabId === tabId) return;
   state.tabId = tabId;
   await saveState(state, tabId);
-  await injectRecorder(tabId);
+  await injectAll(tabId);
   pushToPopup(state);
 }
 
@@ -288,6 +453,25 @@ async function handleStart(msg) {
     description: ''
   });
 
+  // 同时开一个"接口录制会话"：服务端只登记 id，真正的请求由本插件上报
+  const netEnabled = msg.netEnabled === undefined ? state0.netEnabled !== false : msg.netEnabled === true;
+  let captureId = '';
+  let netError = '';
+  if (netEnabled) {
+    try {
+      const cap = await api('/api/collect/captures', 'POST', {
+        source: 'extension',
+        start_url: startUrl,
+        note: name,
+        user_agent: navigator.userAgent || ''
+      });
+      captureId = (cap && cap.capture && cap.capture.id) || '';
+      if (!captureId) netError = '服务端没有返回录制会话 id（接口采集功能是否可用？）';
+    } catch (e) {
+      netError = '接口录制会话创建失败：' + e.message;
+    }
+  }
+
   const next = Object.assign({}, state0, {
     active: true,
     recordingId: (recording && recording.id) || '',
@@ -296,18 +480,22 @@ async function handleStart(msg) {
     tabId,
     stepCount: 0,
     lastStepId: '',
-    lastStepAnnotation: ''
+    lastStepAnnotation: '',
+    netEnabled,
+    captureId,
+    netCount: 0
   });
   if (!next.recordingId) {
     return { ok: false, error: '服务端未返回录制 id，请检查服务端版本' };
   }
 
+  netBuf = [];
   await saveState(next, tabId);
   // 起始页视为"已记录"，避免第一条 tabs.onUpdated 重复记录起始 URL
   await saveInternal({ lastStepAction: '', lastStepLocatorValue: '', lastNavUrl: startUrl });
   // 关键：立即把录制脚本注入录制标签页，用户无需手动刷新页面
-  const injected = await injectRecorder(tabId);
-  return { ok: true, recording, injected };
+  const injected = await injectAll(tabId);
+  return { ok: true, recording, injected, captureId, netEnabled, netError };
 }
 
 /** 把内存里的步骤清洗成 API 要求的入参（去掉 id / recording_id / index） */
@@ -445,8 +633,16 @@ async function handleInject(msg) {
     state.tabId = tabId;
     await saveState(state, tabId);
   }
-  const res = await injectRecorder(tabId);
-  return Object.assign({ ok: res.ok, error: res.error || '', tabId: tabId, state: await getState() }, res);
+  const res = await injectAll(tabId);
+  const net = res.net || { ok: false };
+  return Object.assign({
+    ok: res.recorder.ok,
+    error: res.recorder.error || '',
+    netOk: net.ok === true,
+    netError: net.error || '',
+    tabId: tabId,
+    state: await getState()
+  }, res.recorder);
 }
 
 async function handleState(sender) {
@@ -482,13 +678,23 @@ async function handleSetServer(msg) {
 async function finishRecording(reason) {
   const state = await getState();
   if (!state.active) {
-    return { ok: true, recordingId: state.recordingId, stepCount: state.stepCount, alreadyStopped: true, reason: reason || '' };
+    return { ok: true, recordingId: state.recordingId, stepCount: state.stepCount, netCount: state.netCount, captureId: state.captureId, alreadyStopped: true, reason: reason || '' };
   }
 
   const recordingId = state.recordingId;
   const recordingName = state.recordingName;
   const stepCount = state.stepCount;
   const oldTabId = state.tabId;
+
+  // 先把缓冲里的接口记录发完，再告诉服务端"这次录制结束了"
+  try {
+    await flushNet();
+  } catch (e) { /* 忽略 */ }
+  if (state.captureId) {
+    try {
+      await api('/api/collect/captures/' + encodeURIComponent(state.captureId) + '/stop', 'POST', {});
+    } catch (e) { /* 停止失败不影响本地收尾 */ }
+  }
 
   let patchError = '';
   if (recordingId) {
@@ -513,6 +719,12 @@ async function finishRecording(reason) {
   await saveState(next, oldTabId);            // oldTabId 让内容脚本能收到"已停止"并移除浮层
   await saveInternal(DEFAULT_INTERNAL);
 
+  // 录到接口了？直接把"录制结果"页打开，用户不用去控制台里翻（可在弹窗里关掉）
+  let openedCapture = false;
+  if (state.captureId && (state.netCount || 0) > 0 && state.autoOpenCapture !== false) {
+    openedCapture = await openCapturePage(state);
+  }
+
   const warn = stepCount > 0 ? '' :
     '这次没有录到任何操作步骤：被测页面可能在安装/更新插件之前就已打开，' +
     '请在录制状态下点「注入录制脚本」或刷新页面后再操作一次。';
@@ -523,11 +735,22 @@ async function finishRecording(reason) {
       error: '本机已停止录制，但服务端保存失败：' + patchError,
       recordingId: recordingId,
       stepCount: stepCount,
+      netCount: state.netCount,
+      captureId: state.captureId,
       warn: warn,
       reason: reason || ''
     };
   }
-  return { ok: true, recordingId: recordingId, stepCount: stepCount, warn: warn, reason: reason || '' };
+  return {
+    ok: true,
+    recordingId: recordingId,
+    stepCount: stepCount,
+    netCount: state.netCount,
+    captureId: state.captureId,
+    openedCapture: openedCapture,
+    warn: warn,
+    reason: reason || ''
+  };
 }
 
 /* ---------------- 导航步骤 ---------------- */
@@ -617,6 +840,14 @@ async function dispatch(msg, sender) {
       return handleInject(msg);
     case 'setServer':
       return handleSetServer(msg);
+    case 'net':
+      return handleNet(msg);
+    case 'setNet':
+      return handleSetNet(msg);
+    case 'setAutoOpen':
+      return handleSetAutoOpen(msg);
+    case 'openCapture':
+      return handleOpenCapture();
     default:
       return { ok: false, error: '未知消息类型：' + String(msg.type) };
   }
@@ -638,7 +869,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   recordNavigate(tabId, tab).catch(() => { /* 静默失败，不打断用户操作 */ });
   // 页面整页刷新后内容脚本会重新注入，这里不做任何事；但如果是录制标签页刚加载完，补一次注入兜底
   getState().then((state) => {
-    if (state.active && state.tabId === tabId) injectRecorder(tabId).catch(() => {});
+    if (state.active && state.tabId === tabId) injectAll(tabId).catch(() => {});
   }).catch(() => {});
 });
 

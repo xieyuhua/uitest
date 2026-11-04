@@ -26,7 +26,9 @@ import (
 	"uitest-server/internal/api"
 	"uitest-server/internal/browser"
 	"uitest-server/internal/bus"
+	"uitest-server/internal/collect"
 	"uitest-server/internal/config"
+	"uitest-server/internal/demoapi"
 	"uitest-server/internal/engine"
 	"uitest-server/internal/model"
 	"uitest-server/internal/store"
@@ -143,12 +145,21 @@ func main() {
 	})
 	eventBus := bus.New()
 	runner := engine.New(db, browserMgr, eventBus)
-	apiSrv := api.New(db, browserMgr, runner, eventBus, Version, cfg.Server.Port)
+	// 接口采集：录制 → 筛选 → 定时抓取 → 落库（调度器随服务一起启动）
+	collectSvc := collect.NewService(db, browserMgr, eventBus, dataDir)
+	collectSvc.Start()
+	defer collectSvc.Close()
+	apiSrv := api.New(db, browserMgr, runner, eventBus, collectSvc, Version, cfg.Server.Port)
 
 	root := http.NewServeMux()
 	root.Handle("/api/", apiSrv.Handler())
 	root.Handle("/data/runs/", http.StripPrefix("/data/runs/",
 		http.FileServer(http.Dir(filepath.Join(dataDir, "runs")))))
+	// 带分页的示例接口（演练"自动抓取分页数据"用，数据是固定的 23 条）
+	root.Handle("/demo/api/goods", demoapi.GoodsHandler())
+	root.Handle("/demo/api/goods-offset", demoapi.GoodsOffsetHandler())
+	root.Handle("/demo/api/goods-cursor", demoapi.GoodsCursorHandler())
+	root.Handle("/demo/api/info", demoapi.InfoHandler())
 	if sub, err := fs.Sub(demoFS, "demo"); err == nil {
 		root.Handle("/demo/", http.StripPrefix("/demo/", noCache(http.FileServer(http.FS(sub)))))
 	}

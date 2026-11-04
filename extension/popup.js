@@ -29,6 +29,10 @@
     note: document.getElementById('note'),
     noteBtn: document.getElementById('noteBtn'),
     enterSwitch: document.getElementById('enterSwitch'),
+    netSwitch: document.getElementById('netSwitch'),
+    netMeta: document.getElementById('netMeta'),
+    netOpenBtn: document.getElementById('netOpenBtn'),
+    autoOpenSwitch: document.getElementById('autoOpenSwitch'),
     recent: document.getElementById('recent'),
     error: document.getElementById('error'),
     consoleLink: document.getElementById('consoleLink')
@@ -104,7 +108,36 @@
     el.recorderRow.classList.toggle('is-hidden', !active);
     el.recName.disabled = active;
     if (active) {
-      el.recMeta.textContent = (state.recordingName || '未命名录制') + ' · ' + (state.stepCount || 0) + ' 步';
+      el.recMeta.textContent = (state.recordingName || '未命名录制') + ' · ' + (state.stepCount || 0) + ' 步' +
+        (state.netEnabled ? (' · ' + (state.netCount || 0) + ' 接口') : '');
+    }
+
+    // 接口录制：开关 + 条数 + 打开结果页
+    if (el.netSwitch && document.activeElement !== el.netSwitch) {
+      el.netSwitch.checked = state.netEnabled !== false;
+    }
+    if (el.autoOpenSwitch && document.activeElement !== el.autoOpenSwitch) {
+      el.autoOpenSwitch.checked = state.autoOpenCapture !== false;
+    }
+    if (el.netMeta) {
+      var hasCap = !!state.captureId;
+      var n = state.netCount || 0;
+      if (!hasCap) {
+        el.netMeta.textContent = state.netEnabled === false ? '接口录制已关闭' : '已录接口 0 条';
+      } else if (active) {
+        el.netMeta.textContent = '已录接口 ' + n + ' 条（录制中…）';
+      } else {
+        el.netMeta.textContent = '已录接口 ' + n + ' 条 —— 停止后去控制台勾选要抓的接口即可建采集任务';
+      }
+    }
+    if (el.netOpenBtn) {
+      var canOpen = !!state.captureId;
+      el.netOpenBtn.disabled = !canOpen;
+      el.netOpenBtn.classList.toggle('btn-primary', canOpen && !active && (state.netCount || 0) > 0);
+      el.netOpenBtn.classList.toggle('btn-ghost', !(canOpen && !active && (state.netCount || 0) > 0));
+      el.netOpenBtn.textContent = (canOpen && !active && (state.netCount || 0) > 0)
+        ? '去勾选接口 → 建采集任务'
+        : '查看录制结果';
     }
 
     // 上一步备注：状态里有值且用户没在编辑时同步显示
@@ -253,6 +286,7 @@
       if (resp.warn) showError(resp.warn);
       el.note.value = '';
       lastAnnotation = '';
+      // 接口录制的后续动作交给"已录接口 N 条 + 去勾选接口"那一行（见 render）
     } finally {
       el.stopBtn.disabled = false;
     }
@@ -308,6 +342,51 @@
       showError('保存开关失败：' + ((e && e.message) || String(e)));
     }
   });
+
+  /** 接口录制开关：交给 background 存到会话状态（下次开始录制生效，录制中也会即时开关） */
+  if (el.netSwitch) {
+    el.netSwitch.addEventListener('change', async function () {
+      showError('');
+      var on = el.netSwitch.checked === true;
+      var resp = await send({ type: 'setNet', enabled: on });
+      if (!resp || !resp.ok) {
+        showError((resp && resp.error) || '保存接口录制开关失败');
+        return;
+      }
+      if (resp.state) render(resp.state);
+    });
+  }
+
+  /** 停止后自动打开结果页的开关 */
+  if (el.autoOpenSwitch) {
+    el.autoOpenSwitch.addEventListener('change', async function () {
+      showError('');
+      var on = el.autoOpenSwitch.checked === true;
+      var resp = await send({ type: 'setAutoOpen', enabled: on });
+      if (!resp || !resp.ok) {
+        showError((resp && resp.error) || '保存开关失败');
+        return;
+      }
+      if (resp.state) render(resp.state);
+    });
+  }
+
+  /** 打开「接口录制结果」页（控制台里可以勾选接口、删掉不要的、建采集任务） */
+  if (el.netOpenBtn) {
+    el.netOpenBtn.addEventListener('click', async function () {
+      showError('');
+      el.netOpenBtn.disabled = true;
+      try {
+        var resp = await send({ type: 'openCapture' });
+        if (!resp || !resp.ok) {
+          showError((resp && resp.error) || '打开失败');
+          return;
+        }
+      } finally {
+        el.netOpenBtn.disabled = false;
+      }
+    });
+  }
 
   /** 打开控制台 */
   el.consoleLink.addEventListener('click', function (ev) {
