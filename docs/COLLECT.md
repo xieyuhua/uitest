@@ -86,6 +86,23 @@ powershell -ExecutionPolicy Bypass -File scripts\collect-selftest.ps1
 **登录接口 / 未登录 401 / 带 token 200 / 含页面文档录制 / 建任务并运行**，逐项打印 PASS·FAIL；
 失败时会把 `types`、`范围外跳过`、运行日志节选一起打出来。加 `-Keep` 跑完不关服务，可以直接在浏览器里接着手点。
 
+只想验证**会话参数（登录后刷新 → token 覆盖请求头）**这一条链路，跑：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\collect-session-smoke.ps1
+```
+
+它会现场建一条「打开登录页 → 填账号密码 → 点登录 → 等待 2500ms」的登录录制，建一个
+带**旧请求头 + 公共参数绑定 + 登录后刷新**的任务，然后依次断言：
+
+- 前置登录跑通、刷新写入了 `token` / `sid` 参数，并自动生成 `token → header:Authorization` 绑定；
+- 再登一次 token 会变（证明取的是浏览器最新值，不是录制时的旧值）；
+- 试抓**真正发出去**的 `Authorization` 就是刷新后的新 token，且参数绑定压过接口自带的 `X-Tenant`；
+- 粘贴导入 Cookie / Authorization 会落成公共 Cookie + 参数 + 绑定；
+- 没勾「登录后刷新」时只给提示、不动公共参数。
+
+全部用独立端口 + 临时数据目录，跑完自动关服务（`-Keep` 保留），逐项打印 PASS·FAIL。
+
 ### 2.1 五个子菜单
 
 | 子菜单 | 地址 | 干什么 |
@@ -217,6 +234,10 @@ powershell -ExecutionPolicy Bypass -File scripts\collect-selftest.ps1
 > 点任务详情右上角的 **「自检」**：它会按
 > `会话配置 → 前置登录 → 浏览器 Cookie → 导出会话 → 真发一次请求` 逐步给出 ✔/✘ 和明细
 > （Cookie 名字、条数、请求状态码、响应片段），哪一步红了一眼就能定位。
+
+> 小提示：录制里的 **「等待 N 毫秒」在服务端计时**（不依赖页面 JS）。
+> 点完登录按钮页面往往立刻跳转，旧页面上下文会被销毁，这类固定等待不会再因为跳转而报
+> `Inspected target navigated or closed`；「等待某个元素出现」（值填选择器）仍然在页面里等。
 
 ### 3.4 录制小技巧
 
@@ -844,6 +865,7 @@ scripts\collect-smoke.ps1              # 录制 → 建任务 → 执行 → 校
 scripts\collect-extension-smoke.ps1    # 插件上报 → 删接口 → 用剩下的建任务 → 写入 23 行
 scripts\collect-paging-smoke.ps1       # 页码/偏移/游标/请求体/假分页 五种形态
 scripts\collect-files-smoke.ps1        # Excel + JSON 生成、下载、upsert 不重复
+scripts\collect-session-smoke.ps1      # 前置登录 → 登录后刷新 → token 覆盖请求头 / 导入汇总
 ```
 
 全部用独立端口与独立数据目录，跑完自动清理，不动你的 `data/`。
