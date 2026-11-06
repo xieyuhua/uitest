@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -251,6 +252,26 @@ func (r *Runner) execute(ctx context.Context, runID string) {
 	r.finish(runID, "passed", "")
 }
 
+// maxFixedWaitMS 单步固定等待的上限，避免录错一个超大数字把运行卡死。
+const maxFixedWaitMS = 10 * 60 * 1000
+
+// fixedWaitMS 把「固定等待」步骤的值解析成毫秒。
+// 只有纯数字才算固定等待；像 "#loading" 这种是「等某个元素出现」，返回 false 交给页面运行时。
+func fixedWaitMS(value string) (int, bool) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return 0, false
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 0, false
+	}
+	if ms > maxFixedWaitMS {
+		ms = maxFixedWaitMS
+	}
+	return ms, true
+}
+
 // maskStepValue 敏感步骤（密码框一类）只记掩码：值本身照常发给页面，但不进运行记录 / 日志。
 func maskStepValue(step model.Step, value string) string {
 	if !isSensitiveStep(step) {
@@ -320,6 +341,24 @@ func (r *Runner) execStep(ctx context.Context, runID string, page *browser.Page,
 		}
 	case "upload":
 		failure = r.execUpload(stepCtx, page, step, value, &res)
+	case "wait":
+		// 纯数字 = 固定等待：直接在这里睡，不经过页面 JS。
+		// 点完登录按钮页面常常立刻跳转，页面里的 JS 上下文会随旧文档一起销毁，
+		// 走页面执行就会报 "Inspected target navigated or closed"。
+		// 固定等待本来就只是「等一会儿」，不该因为页面跳转而失败；
+		// 非数字（等某个元素出现）仍然交给页面运行时处理。
+		if ms, ok := fixedWaitMS(value); ok {
+			timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				failure = "等待已取消"
+			case <-timer.C:
+				res.Message = fmt.Sprintf("等待 %dms", ms)
+			}
+			break
+		}
+		fallthrough
 	default:
 		if err := r.ensureRuntime(stepCtx, page); err != nil {
 			failure = "注入运行时失败：" + err.Error()
