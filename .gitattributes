@@ -1,0 +1,21 @@
+# ────────────────────────────────────────────────────────────────
+# 换行符统一：仓库里存 LF，检出也用 LF
+# 否则 Windows 上 core.autocrlf=true 会让每个 .go 文件在 gofmt -l 里
+# 一片红（gofmt 认的是 LF），git diff 也整天提示 "LF will be replaced by CRLF"。
+# ────────────────────────────────────────────────────────────────
+* text=auto eol=lf
+
+# 二进制/构建产物：不要做换行符转换
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary

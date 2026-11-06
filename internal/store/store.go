@@ -35,6 +35,8 @@ type Data struct {
 	// ---- 接口采集（录制 → 筛选 → 定时抓取 → 落库）----
 	HarvestTasks map[string]*model.HarvestTask `json:"harvest_tasks"`
 	HarvestRuns  map[string]*model.HarvestRun  `json:"harvest_runs"`
+	// HarvestSinks 「数据写入」页维护的落库配置（任务/接口从它复制一份使用）
+	HarvestSinks map[string]*model.SinkProfile `json:"harvest_sinks"`
 }
 
 // DB 存储实例，所有读写方法都是并发安全的。
@@ -69,6 +71,7 @@ func Open(dir string, keepRuns int) (*DB, error) {
 			Settings:     model.DefaultSettings(),
 			HarvestTasks: map[string]*model.HarvestTask{},
 			HarvestRuns:  map[string]*model.HarvestRun{},
+			HarvestSinks: map[string]*model.SinkProfile{},
 		},
 	}
 	// 启动时先给现有数据做一份滚动快照，避免误删/误改无法回退
@@ -94,6 +97,9 @@ func Open(dir string, keepRuns int) (*DB, error) {
 	}
 	if db.data.HarvestRuns == nil {
 		db.data.HarvestRuns = map[string]*model.HarvestRun{}
+	}
+	if db.data.HarvestSinks == nil {
+		db.data.HarvestSinks = map[string]*model.SinkProfile{}
 	}
 	if db.data.Settings.Browser.StepDelayMS == 0 {
 		db.data.Settings.Browser.StepDelayMS = 260
@@ -917,6 +923,9 @@ func (db *DB) RestoreBackup(name string) error {
 	}
 	if snapshot.HarvestRuns == nil {
 		snapshot.HarvestRuns = map[string]*model.HarvestRun{}
+	}
+	if snapshot.HarvestSinks == nil {
+		snapshot.HarvestSinks = map[string]*model.SinkProfile{}
 	}
 	if snapshot.Settings.Browser.StepDelayMS == 0 {
 		snapshot.Settings = model.DefaultSettings()

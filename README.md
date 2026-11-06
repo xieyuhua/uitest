@@ -31,11 +31,31 @@
 
 ```powershell
 cd uitest
-go build -o uitest-server.exe .      # 依赖全是纯 Go（含 SQLite/MySQL/PG 驱动、Excel 写入库）
-.\uitest-server.exe                  # 或 .\start.ps1 后台启动 / .\stop.ps1 停止
+.\build.ps1                      # 编译到 dist\（或双击 build.cmd；-All 出三平台，-Clean 先清空）
+.\dist\uitest-server-windows-amd64.exe   # 或 .\start.ps1 开发态后台启动 / .\stop.ps1 停止
 ```
 
+不想要 `dist\` 也行，`go build -o uitest-server.exe .` 一样能跑；依赖全是纯 Go（含 SQLite/MySQL/PG 驱动、Excel 写入库）。
+
 打开 <http://127.0.0.1:8490> → 首次启动会自建 `data/`（数据文件、日志、快照、浏览器 profile）。
+
+**想让同网段的其他机器也能访问**（`config.json` 里 `server.host` 默认已经是 `0.0.0.0`）：
+
+```powershell
+.\dist\uitest-server-windows-amd64.exe -host 0.0.0.0     # 或 .\start.ps1 -Bind 0.0.0.0
+# 启动日志会直接把本机所有可用地址列出来，例如：
+#   控制台      http://127.0.0.1:8490/
+#   局域网访问  http://192.168.1.23:8490/
+```
+
+只想本机用：把 `server.host` 改回 `127.0.0.1`（或 `-host 127.0.0.1`）。
+首次以 `0.0.0.0` 启动时 Windows 可能弹出「是否允许此应用通过防火墙」，选允许（专用网络）才能被同网段访问。
+⚠️ 控制台与 API **没有登录鉴权**，绑到 `0.0.0.0` 等于把「启动内置浏览器 / 改配置 / 跑采集任务」的权限开放给同网段，
+请只在可信网络使用；需要更严一点就用防火墙只放行你自己的 IP：
+
+```powershell
+netsh advfirewall firewall add rule name="uitest-8490" dir=in action=allow protocol=TCP localport=8490 remoteip=192.168.1.0/24
+```
 
 **UI 自动化**（5 分钟）：
 
@@ -47,15 +67,46 @@ go build -o uitest-server.exe .      # 依赖全是纯 Go（含 SQLite/MySQL/PG 
 
 **接口采集**（5 分钟）：
 
-1. 顶部导航「接口采集」→ 两种录法任选：
+1. 左侧菜单「接口采集 → 录制接口」→ 两种录法任选：
    - 插件弹窗里勾着「同时录制接口请求」，在你自己的浏览器里正常操作（推荐）；
    - 或在「录制接口」卡片里填 `http://127.0.0.1:8490/demo/api-center.html`，用内置浏览器录；
 2. 停止录制 → 进「录制结果」勾选要抓的接口（可先筛选、可删掉心跳/埋点）→「下一步：配置采集任务」；
 3. 定时选「每 1 小时」、落库选「Excel 表格」→ 创建 → 点「立即运行」；
-4. 回首页「产出文件」下载 `.xlsx`（示例数据 23 条，会自动翻完 5 页）。
+4. 「接口采集 → 执行日志 → 查看」看这次跑得怎么样：**每次请求与响应都按顺序记在运行日志里**（明文，含 Cookie / 请求头 / 请求体 / 响应体），分页跑多页就有多组；勾「只看请求/响应」可以先把业务日志滤掉；
+5. 「接口采集 → 产出文件」下载 `.xlsx`（示例数据 23 条、每页 3 条，会自动翻完 8 页）。
+
+想让**不同接口写不同表 / 不同文件**：任务详情里勾「每个接口单独分表 / 分文件」（表名 = 任务表名 + 接口名），
+或在某个接口上单独填「写入表 / 文件名」。「接口采集 → 数据写入」里维护可复用的连接配置（新建 / 测试 / 保存 / 删除）。
+
+**录制只记「接口地址 + 请求参数」**：Cookie / Authorization / User-Agent / Referer 这类登录态头不写进录制结果（只留 `Content-Type`），
+运行期全部由「前置登录 + 浏览器会话」实时提供——否则任务里会钉死一份过期值，还会和会话 Cookie 重复。
+
+**采集任务本质是回放录制会话里那几条请求**：建任务时会把每条请求的原始信息存一份快照在接口上，
+任务详情展开任一接口，既能看到「录制时的请求数据」（请求头明文含 Cookie、请求体、来源页面与录制时间），
+也**可以直接改请求头和请求体**（点「填入请求头 / 填入请求体」把录制值搬下来再改，保存后抓取就用你改的值）。
+
+**公共参数 + 页签式任务详情**：任务详情分成 概览 / 公共参数 / 登录 / 接口设计 / 调度与落库 五个页签；
+「公共参数」里配所有接口共用的 query/body 参数、公共请求头，以及**登录成功后执行的脚本**（可读 localStorage / cookie，
+返回 `{"params":{…},"headers":{…}}` 或 `{"token":"…"}`）。优先级：公共参数 → 接口配置 → 前置登录后的浏览器头 → 脚本。
+
+**落库 SQL 可查**：运行日志里 `SQL` 级别的行会打印建表 / 补列 / 建索引 / INSERT 模板与每批展开的整句 SQL（可勾「只看 SQL」）。
+
+**跑完推企业微信群**：设置 →「运行通知」填 Webhook + 勾「成功时推送 / 失败时推送」，**一次配置所有采集任务共用**；
+任务跑完就推一条 markdown（任务名、状态、触发方式、接口成功/失败数、请求数、写入行数、耗时、错误原因、运行日志链接）；
+推送是异步的，失败只记一条 warn 到运行日志，不影响采集本身；点「发一条测试」可先验证 webhook（见 [COLLECT 8.1](docs/COLLECT.md)）。
+
+**登录态只有一种玩法**：任务详情「前置登录（UI 自动化）」选一段录好的登录流程，运行前先在浏览器里真登一遍（多步跳转、单点登录都能应付；图形验证码仍需人工），
+登完**立刻导出浏览器会话 → 抓取时 Cookie 和请求头全部共享浏览器的**（`Authorization` / `User-Agent` / `X-*` 都是浏览器实时值），
+只有 URL / 请求体这些请求参数按接口配置；`浏览器请求头` 可选 全部共享（默认）/ 只共享鉴权头 / 不共享（见 [COLLECT 3.1](docs/COLLECT.md)）。
+**「登录用变量」必须填 `password=...`**（录制器会把密码框脱敏成 `{{password}}`，不填就登不进去），
+可选「只在会话失效（401/403）时补跑」；点「自检」能逐步看到登录、Cookie、请求头每一步的结果（见 [COLLECT 3.3](docs/COLLECT.md)）。
 
 想先要演示数据？`powershell -ExecutionPolicy Bypass -File scripts\seed-demo.ps1`
-（`data/` 不入库，新克隆的仓库第一次是空的，跑它就能生成 8 个示例场景）。
+（`data/` 不入库，新克隆的仓库第一次是空的，跑它就能生成 7 条示例流程、共 63 步）。
+
+想验证**登录态 / 含页面文档录制**，服务自带一套"需要登录"的示例，不用接你的真实系统：
+打开 `/demo/collect-login.html`（`admin` / `123456`）→ 进 `/demo/collect-orders.html` → 用「接口采集」录它（范围选含页面文档）
+→ 建任务时配好「前置登录」，运行日志里就能看到 `Authorization` 用的是浏览器里最新的 token。
 
 ---
 
@@ -110,7 +161,7 @@ uitest/
 ├─ runtime/uitest-keys.js  # ★ 浏览器侧共享运行时（定位/动作唯一实现，go:embed）
 ├─ extension/              # MV3 插件（UI 录制 + 接口录制，与 runtime 共用同一份运行时）
 ├─ web/                    # 控制台：app.js 主控制台、collect.js 采集页（原生 JS，无构建）
-├─ demo/                   # 8 个示例场景页 + api-center.html（接口采集演练页）
+├─ demo/                   # 8 个示例页面 + gallery.html 总览 + api-center.html（采集演练页）
 ├─ cmd/scenarios/          # 一键跑全部示例场景的验证工具
 ├─ scripts/                # 自检 / 生成示例数据 / 下载内核 / 交叉编译
 ├─ docs/                   # GUIDE · COLLECT · API · screenshots
@@ -129,14 +180,18 @@ uitest/
 
 | 命令 | 作用 | 期望输出 |
 |---|---|---|
+| `go test ./...` | 单元测试（定位/筛选/截断/ETag 等纯逻辑） | 全部 `ok`，无 FAIL |
 | `scripts\smoke.ps1` | 单条流程 + 自愈 + 回写 | 自检通过 ✅ |
 | `scripts\collect-smoke.ps1` | 采集全链路（录制→建任务→执行→校验行数） | 接口采集自检通过 ✅ |
 | `scripts\collect-extension-smoke.ps1` | 插件上报 → 删接口 → 用剩下的建任务 | 插件录制自检通过 ✅ |
 | `scripts\collect-paging-smoke.ps1` | 5 种分页形态（页码/偏移/游标/请求体/假分页） | 分页采集自检通过 ✅ |
 | `scripts\collect-files-smoke.ps1` | Excel + JSON 落库、下载、upsert 不重复 | 文件落库自检通过 ✅ |
-| `go run ./cmd/scenarios` | 7 个示例场景（63 步）跨版本回放 | 场景结果：7/7 通过 ✅ |
-| `scripts\build-all.ps1` | 交叉编译 windows/amd64 + linux/amd64 + arm64 | `dist/` 三个可执行文件 |
-| `scripts\seed-demo.ps1` | 生成示例录制（等价于 `cmd/scenarios -keep`） | 控制台「录制」列表有 8 项 |
+| `go run ./cmd/scenarios` | 7 条示例流程（63 步）跨版本回放 | 场景结果：7/7 通过 ✅ |
+| `build.ps1` / `build.cmd` | 根目录编译入口，转发到 `scripts\build.ps1`（`-All` / `-Clean` / `-Targets`） | `dist/` 里是可直接运行的二进制 |
+| `scripts\collect-selftest.ps1` | 接口采集自动化自测：自己编译 + 起独立实例（独立端口/数据目录）→ 测 demo 登录、含页面文档录制、建任务运行，逐项 PASS/FAIL | `-Keep` 跑完不关服务方便手工点；`-NoBuild` 复用上次的 exe |
+| `scripts\build.ps1` | 编译到 `dist\`：默认当前平台，`-All` 出 windows/amd64 + linux/amd64 + arm64，`-Clean` 先清空，附带 `config.json` 与 `BUILD.txt` | 同上 |
+| `scripts\build-all.ps1` | 老命令，等价于 `build.ps1 -All` | 同上 |
+| `scripts\seed-demo.ps1` | 生成示例录制（等价于 `cmd/scenarios -keep`） | 控制台「录制」列表有 7 项 |
 
 自检脚本都用独立端口 + 独立数据目录，跑完自动清理，**不会动你的 `data/`**。
 
@@ -148,8 +203,8 @@ uitest/
 
 | 变量 | 作用 |
 |---|---|
-| `UITEST_PORT` | 监听端口（默认 8490） |
-| `UITEST_HOST` | 监听地址（默认 127.0.0.1；容器里要外部访问填 `0.0.0.0`） |
+| `UITEST_PORT` | 监听端口（默认 8490；也可用 `-port` 启动参数） |
+| `UITEST_HOST` | 监听地址（`config.json` 默认 `0.0.0.0`，局域网可访问；只想本机用填 `127.0.0.1`；也可用 `-host` 启动参数） |
 | `UITEST_DATA_DIR` | 数据目录（默认 `data`） |
 | `UITEST_BROWSER` | 浏览器可执行文件路径 |
 | `UITEST_HEADLESS` | `1` = 无头 |
@@ -168,7 +223,7 @@ uitest/
 | **[docs/API.md](docs/API.md)** | HTTP 接口契约：通用约定、全部端点、数据模型、curl 示例 | 要写脚本 / 接第三方 |
 | **[extension/README.md](extension/README.md)** | 插件手册：安装、权限、UI 录制、接口录制、稳定 ID 原理、FAQ | 改插件或排查插件问题 |
 
-示例页面：<http://127.0.0.1:8490/demo/gallery.html>（8 个场景，覆盖表单/登录/列表/弹窗/向导/标签页/跨版本打包）、
+示例页面：<http://127.0.0.1:8490/demo/gallery.html>（8 个示例页面总览，覆盖表单/登录/列表/弹窗/向导/标签页/跨版本打包）、
 <http://127.0.0.1:8490/demo/api-center.html>（四种分页形态 + 固定 23 条数据）。
 
 ---
@@ -182,9 +237,9 @@ uitest/
 | 3 | 富文本（Quill/ProseMirror）取值可能不准 | 用断言兜底，或改 `data_key` 手填 |
 | 4 | 上传只录到文件名 | 执行时用数据准备里的值当本地路径，空则用内置示例 PNG |
 | 5 | 画布/拖拽类组件只能定位容器 | 做不到像素级操作 |
-| 6 | 运行记录默认保留 200 条（`storage.keep_runs`），采集运行 300 条 | 超出的自动清理 |
+| 6 | 运行记录默认保留 200 条（`storage.keep_runs` 可调），采集运行记录固定 300 条 | 超出的自动清理 |
 | 7 | 单机单进程，不搞多租户 | 可并行多个 run，但共享一个浏览器进程 |
 | 8 | 内置浏览器只能访问本机能访问的网络 | 内网/离线环境打开外网必然失败 |
 | 9 | 采集录制结果只存内存 | 服务重启即清空（任务与已入库数据不受影响） |
-| 10 | `session.mode=browser` 需要本机能起浏览器 | 纯 Linux 服务器建议改用 `cookie` 模式 |
+| 10 | 采集会话只有浏览器一种来源，运行机必须能起 Chromium | 无桌面 Linux 设 `browser.headless=true` + `browser.no_sandbox=true`，或用 `browser.debug_url` 接现成的 CDP 端点 |
 | 11 | 礼貌采集是**刻意限制** | 需要更快请拆成多个任务，而不是把间隔调到 0 |

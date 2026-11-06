@@ -1,4 +1,4 @@
-﻿# 生成示例数据：8 个示例场景（63 步）
+﻿# 生成示例数据：7 条示例流程（63 步，覆盖 8 个示例页面）
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\seed-demo.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\seed-demo.ps1 -Port 8490 -Only 登录

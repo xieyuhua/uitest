@@ -40,8 +40,10 @@
 
 ```powershell
 cd uitest
-go build -o uitest-server.exe .
-.\uitest-server.exe            # 前台；或 .\start.ps1 后台启动、.\stop.ps1 停止
+.\scripts\build.ps1               # 编译到 dist\（当前平台；-All 出三平台）
+.\dist\uitest-server-windows-amd64.exe   # 前台；或 .\start.ps1 后台启动、.\stop.ps1 停止
+
+# 也可以不用 dist：go build -o uitest-server.exe . && .\uitest-server.exe
 ```
 
 打开 <http://127.0.0.1:8490>。首次启动会自动：建 `data/uitest.json`（数据文件）、
@@ -49,10 +51,11 @@ go build -o uitest-server.exe .
 
 | 命令 | 作用 |
 |---|---|
-| `.\start.ps1` | 后台启动，日志写 `data-start.log` |
+| `.\start.ps1` | 后台启动，日志写 `data-start.log`（`-Bind 0.0.0.0` 可对局域网开放） |
 | `.\stop.ps1` | 停止后台实例 |
 | `scripts\fetch-browser.ps1` | 下载自带内核 Chrome for Testing（可加 `-Mirror npmmirror` 走国内镜像） |
-| `scripts\build-all.ps1` | 交叉编译 Windows / Linux(amd64、arm64) |
+| `scripts\build.ps1` | 编译到 `dist\`：默认当前平台，`-All` 三平台，`-Clean` 先清空并附 `config.json` / `BUILD.txt` |
+| `scripts\build-all.ps1` | 老命令，等价于 `build.ps1 -All` |
 
 端口与数据目录：`UITEST_PORT`、`UITEST_HOST`、`UITEST_DATA_DIR`（见 [README 第六节](../README.md#六配置)）。
 
@@ -204,7 +207,11 @@ go run ./cmd/scenarios -only 重新打包
 | 运行列表 | `#/runs` | 状态/录制名/模式/耗时/通过步数 |
 | 运行详情 | `#/runs/{id}` | 见[第 5 章](#5-教程-c看运行详情) |
 | 元素库 | `#/elements` | 插件上报的元素绑定（`data-uitest-id` ↔ 业务语义），跨录制复用与人眼核对 |
-| 接口采集 | `#/collect` | 另一条线，见 [COLLECT.md](COLLECT.md) |
+| 接口采集 · 录制接口 | `#/collect/captures` | 起录制、看录制会话与已录请求（详见 [COLLECT.md](COLLECT.md)） |
+| 接口采集 · 采集任务 | `#/collect/tasks` | 任务列表；任务详情 `#/collect/task/{id}` 里配接口、定时、限速、写入目标 |
+| 接口采集 · 产出文件 | `#/collect/files` | Excel / JSON / JSONL 产出，直接下载 |
+| 接口采集 · 数据写入 | `#/collect/sinks` | 落库配置的**新建 / 测试连接 / 保存 / 删除**；不同接口可写不同表或不同文件 |
+| 接口采集 · 执行日志 | `#/collect/runs` | 每次采集的请求数 / 解析 / 写入；详情 `#/collect/run/{id}` 的运行日志里逐次记录请求与响应（明文，可勾「只看请求/响应」） |
 | 设置 | `#/settings/{ai,browser,assist,backups,help}` | 五个独立子页，各自保存 |
 
 ### 7.2 列表通用操作（录制 / 运行 / 元素库一致）
@@ -380,7 +387,7 @@ powershell -ExecutionPolicy Bypass -File scripts\fetch-browser.ps1 -Mirror npmmi
 powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
 #    期望结尾：自检通过 ✅
 
-# 2) 7 个示例场景（表单/登录/列表/弹窗/向导/标签页/跨版本）
+# 2) 7 条示例流程（63 步，表单/登录/列表/弹窗/向导/标签页/跨版本）
 go run ./cmd/scenarios
 #    期望结尾：全部场景通过 ✅
 

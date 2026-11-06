@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,6 +162,63 @@ type sqlSink struct {
 	mu      sync.Mutex
 	known   map[string]bool
 	created bool
+
+	// onSQL 把"实际执行的 SQL 语句"往上报（控制台运行日志用）；nil = 不记
+	onSQL func(string)
+}
+
+// WithSQLLogger 给 sink 挂一个 SQL 日志钩子（只有 SQL 类 sink 生效），返回同一个 sink。
+func WithSQLLogger(s Sink, fn func(string)) Sink {
+	if v, ok := s.(*sqlSink); ok {
+		v.onSQL = fn
+	}
+	return s
+}
+
+// logSQL 记一条实际执行的 SQL（nil 安全）。
+func (s *sqlSink) logSQL(q string) {
+	if s.onSQL == nil {
+		return
+	}
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return
+	}
+	s.onSQL(q)
+}
+
+// sqlLiteral 把一个参数值写成 SQL 字面量，便于在日志里看到"能直接跑的整句 SQL"。
+func sqlLiteral(v any) string {
+	switch tv := v.(type) {
+	case nil:
+		return "NULL"
+	case string:
+		return "'" + strings.ReplaceAll(tv, "'", "''") + "'"
+	case []byte:
+		var b strings.Builder
+		b.WriteString("X'")
+		for _, c := range tv {
+			b.WriteString(fmt.Sprintf("%02x", c))
+		}
+		b.WriteString("'")
+		return b.String()
+	case bool:
+		if tv {
+			return "1"
+		}
+		return "0"
+	case time.Time:
+		return "'" + tv.Format("2006-01-02 15:04:05") + "'"
+	case float64:
+		if tv == float64(int64(tv)) {
+			return strconv.FormatInt(int64(tv), 10)
+		}
+		return strconv.FormatFloat(tv, 'f', -1, 64)
+	case int, int8, int16, int32, int64:
+		return fmt.Sprintf("%d", tv)
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprintf("%v", tv), "'", "''") + "'"
+	}
 }
 
 func newSQLSink(db *sql.DB, dialect, table, mode, key string, batch int, desc string) *sqlSink {
@@ -264,6 +322,7 @@ func (s *sqlSink) ensureSchema(rows []map[string]any) error {
 			defs = append(defs, s.quoteIdent(c)+" "+s.columnType(rows, c))
 		}
 		create := "CREATE TABLE IF NOT EXISTS " + s.quoteIdent(s.table) + " (" + strings.Join(defs, ", ") + ")"
+		s.logSQL("建表：" + create)
 		if _, err := s.db.Exec(create); err != nil {
 			return fmt.Errorf("建表失败：%w", err)
 		}
@@ -279,6 +338,7 @@ func (s *sqlSink) ensureSchema(rows []map[string]any) error {
 			continue
 		}
 		alter := "ALTER TABLE " + s.quoteIdent(s.table) + " ADD COLUMN " + s.quoteIdent(c) + " " + s.columnType(rows, c)
+		s.logSQL("补列：" + alter)
 		if _, err := s.db.Exec(alter); err != nil {
 			// 列已存在（多进程并发）之类：忽略，后面插入会自然成功
 			s.known[c] = true
@@ -303,19 +363,23 @@ func (s *sqlSink) ensureKeyIndex() {
 	default:
 		stmt = "CREATE UNIQUE INDEX IF NOT EXISTS " + s.quoteIdent(idx) + " ON " + s.quoteIdent(s.table) + " (" + s.quoteIdent(s.key) + ")"
 	}
+	s.logSQL("建唯一索引（upsert 用）：" + stmt)
 	_, _ = s.db.Exec(stmt)
 }
 
-// buildInsert 生成 INSERT（upsert 模式带冲突处理）。
-func (s *sqlSink) buildInsert(cols []string) string {
-	var quoted, holders []string
-	for i, c := range cols {
+// insertHead 生成 "INSERT INTO 表 (列…) VALUES " 这段。
+func (s *sqlSink) insertHead(cols []string) string {
+	var quoted []string
+	for _, c := range cols {
 		quoted = append(quoted, s.quoteIdent(c))
-		holders = append(holders, s.placeholder(i))
 	}
-	sql := "INSERT INTO " + s.quoteIdent(s.table) + " (" + strings.Join(quoted, ", ") + ") VALUES (" + strings.Join(holders, ", ") + ")"
+	return "INSERT INTO " + s.quoteIdent(s.table) + " (" + strings.Join(quoted, ", ") + ") VALUES "
+}
+
+// upsertTail upsert 模式的冲突处理后缀（append 模式返回空）。
+func (s *sqlSink) upsertTail(cols []string) string {
 	if s.mode != "upsert" || s.key == "" || len(cols) <= 1 {
-		return sql
+		return ""
 	}
 	idx := -1
 	for i, c := range cols {
@@ -325,7 +389,7 @@ func (s *sqlSink) buildInsert(cols []string) string {
 		}
 	}
 	if idx < 0 {
-		return sql
+		return ""
 	}
 	var updates []string
 	for _, c := range cols {
@@ -339,14 +403,45 @@ func (s *sqlSink) buildInsert(cols []string) string {
 		}
 	}
 	if len(updates) == 0 {
-		return sql
+		return ""
 	}
 	switch s.dialect {
 	case "mysql":
-		return sql + " ON DUPLICATE KEY UPDATE " + strings.Join(updates, ", ")
+		return " ON DUPLICATE KEY UPDATE " + strings.Join(updates, ", ")
 	default:
-		return sql + " ON CONFLICT (" + s.quoteIdent(s.key) + ") DO UPDATE SET " + strings.Join(updates, ", ")
+		return " ON CONFLICT (" + s.quoteIdent(s.key) + ") DO UPDATE SET " + strings.Join(updates, ", ")
 	}
+}
+
+// buildInsert 生成 INSERT（upsert 模式带冲突处理）。
+func (s *sqlSink) buildInsert(cols []string) string {
+	var holders []string
+	for i := range cols {
+		holders = append(holders, s.placeholder(i))
+	}
+	return s.insertHead(cols) + "(" + strings.Join(holders, ", ") + ")" + s.upsertTail(cols)
+}
+
+// expandInsert 把这一批数据写成"字面量已展开、可以直接拿去执行"的整句 SQL（日志用）。
+// 行数最多展示 5 行，其余省略，避免把运行日志撑爆。
+func (s *sqlSink) expandInsert(cols []string, rows []map[string]any) string {
+	const maxRows = 5
+	var tuples []string
+	for i, row := range rows {
+		if i >= maxRows {
+			break
+		}
+		var vals []string
+		for _, c := range cols {
+			vals = append(vals, sqlLiteral(normalizeValue(row[c], s.dialect)))
+		}
+		tuples = append(tuples, "("+strings.Join(vals, ", ")+")")
+	}
+	sqlText := s.insertHead(cols) + strings.Join(tuples, ", ") + s.upsertTail(cols) + ";"
+	if len(rows) > maxRows {
+		sqlText += fmt.Sprintf("  -- 共 %d 行，其余 %d 行同语句", len(rows), len(rows)-maxRows)
+	}
+	return sqlText
 }
 
 func (s *sqlSink) Write(rows []map[string]any) (int, error) {
@@ -364,6 +459,9 @@ func (s *sqlSink) Write(rows []map[string]any) (int, error) {
 		return 0, nil
 	}
 	stmt := s.buildInsert(cols)
+	if s.onSQL != nil {
+		s.logSQL("INSERT 模板（预编译一次、逐行执行）：" + stmt)
+	}
 	written := 0
 	batch := s.batch
 	if batch <= 0 {
@@ -396,6 +494,10 @@ func (s *sqlSink) Write(rows []map[string]any) (int, error) {
 		}
 		if err := tx.Commit(); err != nil {
 			return written, fmt.Errorf("提交事务失败：%w", err)
+		}
+		if s.onSQL != nil {
+			s.logSQL(fmt.Sprintf("第 %d 批（%d 行，已提交）%s", start/batch+1, end-start,
+				s.expandInsert(cols, rows[start:end])))
 		}
 	}
 	return written, nil

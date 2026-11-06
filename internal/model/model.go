@@ -2,7 +2,10 @@
 // 字段名与 docs/API.md 的 JSON 契约严格一致（snake_case），前端与插件都按此解析。
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Locator 元素定位描述。strategy 取值：
 // uid(data-uitest-id，首选) | id | name | css | xpath | text | label | placeholder
@@ -131,7 +134,7 @@ type StepResult struct {
 // LogEntry 执行日志一行。
 type LogEntry struct {
 	TS      time.Time `json:"ts"`
-	Level   string    `json:"level"` // info | warn | error
+	Level   string    `json:"level"` // info | warn | error | http（http=请求/响应报文）
 	Index   int       `json:"index"` // 关联步骤序号，0 表示整体
 	Message string    `json:"message"`
 }
@@ -217,7 +220,34 @@ type Settings struct {
 	AI      AISettings      `json:"ai"`
 	Browser BrowserSettings `json:"browser"`
 	Assist  AssistSettings  `json:"assist"`
+	Notify  NotifySettings  `json:"notify"`
 }
+
+// NotifySettings 全局运行通知（企业微信群机器人）——系统统一设置，所有采集任务共用。
+type NotifySettings struct {
+	// Enabled 总开关：关掉后所有任务都不推
+	Enabled bool `json:"enabled"`
+	// Webhook 群机器人地址：https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx
+	Webhook string `json:"webhook,omitempty"`
+	// OnSuccess / OnFailure 什么时候推（默认都推）
+	OnSuccess *bool `json:"on_success,omitempty"`
+	OnFailure *bool `json:"on_failure,omitempty"`
+	// Mentioned 要 @ 的 userid / 手机号；填 all = @所有人（会改用 text 消息）
+	Mentioned []string `json:"mentioned,omitempty"`
+	// BaseURL 详情链接前缀，如 http://127.0.0.1:8490（留空则消息里不带链接）
+	BaseURL string `json:"base_url,omitempty"`
+}
+
+// Active 是否真的会推送。
+func (n NotifySettings) Active() bool {
+	return n.Enabled && strings.TrimSpace(n.Webhook) != ""
+}
+
+// WantSuccess 成功时是否推送。
+func (n NotifySettings) WantSuccess() bool { return n.OnSuccess == nil || *n.OnSuccess }
+
+// WantFailure 失败时是否推送。
+func (n NotifySettings) WantFailure() bool { return n.OnFailure == nil || *n.OnFailure }
 
 // AssistSettings 三项"省事"辅助能力的开关（控制台设置页可逐项开关）。
 type AssistSettings struct {

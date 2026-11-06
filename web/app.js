@@ -5,9 +5,12 @@
  *   1. 常量与文案映射
  *   2. 通用工具（转义 / 时间 / 格式化）
  *   3. 接口封装 api() + toast + 模态框 + 二次确认
- *   4. 顶部导航：健康轮询 / 内置浏览器控制
- *   5. hash 路由与页面清理（定时器 / SSE）
- *   6. 页面：录制列表 / 录制详情 / 运行列表 / 运行详情 / 元素库 / 设置
+ *   4. 顶栏：健康轮询 / 内置浏览器控制
+ *   5. 后台框架：侧边菜单收起 / 窄屏抽屉
+ *   6. hash 路由 + 页面级清理
+ *      6.1 录制列表  6.2 录制详情  6.3 运行列表
+ *      6.4 运行详情  6.5 元素库    6.6 设置
+ *   7. 对外暴露 window.UITest（供 collect.js 复用）
  *
  * 说明：所有接口均为同源相对路径 fetch('/api/...')，字段名严格按 docs/API.md（snake_case）。
  * ========================================================================== */
@@ -213,6 +216,8 @@
     if (l === 'error' || l === 'err' || l === 'fatal') return 'err';
     if (l === 'warn' || l === 'warning') return 'warn';
     if (l === 'success' || l === 'ok' || l === 'passed') return 'ok';
+    if (l === 'http' || l === 'req' || l === 'res') return 'http';
+    if (l === 'sql' || l === 'db') return 'sql';
     if (l === 'debug' || l === 'trace') return 'debug';
     return 'info';
   }
@@ -382,13 +387,13 @@
   }
 
   /* ======================================================================
-   * 4. 顶部导航：健康轮询 + 内置浏览器控制
+   * 4. 顶栏：健康轮询 + 内置浏览器控制
    * ====================================================================== */
 
   var Health = { data: null, timer: null };
 
   // 辅助能力开关（服务端 /api/health 带出来，控制台全局用来决定是否显示提醒等）
-  var Assist = { auto_data_key: true, stable_id_hint: true, auto_rebind_uid: true };
+  var Assist = { stable_id_hint: true };
 
   async function refreshHealth() {
     try {
@@ -398,9 +403,7 @@
     }
     if (Health.data && Health.data.assist) {
       var a = Health.data.assist;
-      Assist.auto_data_key = a.auto_data_key !== false;
       Assist.stable_id_hint = a.stable_id_hint !== false;
-      Assist.auto_rebind_uid = a.auto_rebind_uid !== false;
     }
     paintHealth();
   }
@@ -410,20 +413,34 @@
     if (!host) return;
     var h = Health.data;
 
+    var verEl = $('#side-ver');
+    var navCount = $('#nav-rec-count');
+
     var badge;
     if (h && h.ok !== false) {
       var count = (h.recordings === null || h.recordings === undefined) ? 0 : h.recordings;
       badge = '<span class="badge badge--ok" title="服务端版本 ' + esc(h.version || '') + '">' +
         '<i class="dot"></i>服务正常 · ' + esc(count) + ' 条录制</span>';
+      if (verEl) verEl.textContent = h.version ? String(h.version) : '—';
+      if (navCount) {
+        navCount.textContent = count ? String(count) : '';
+        navCount.classList.toggle('hidden', !count);
+      }
     } else {
       badge = '<span class="badge badge--fail" title="无法访问 /api/health"><i class="dot"></i>服务异常</span>';
+      if (verEl) verEl.textContent = '—';
+      if (navCount) { navCount.textContent = ''; navCount.classList.add('hidden'); }
     }
 
     var running = !!(h && (h.browser_running === true || h.browser_running === 'true'));
-    host.innerHTML = badge +
+    var html = badge +
       '<span class="browser-state ' + (running ? 'is-on' : '') + '">浏览器：' + (running ? '运行中' : '未启动') + '</span>' +
       '<button class="btn btn--sm" data-browser="launch"' + (running ? ' disabled' : '') + '>启动浏览器</button>' +
       '<button class="btn btn--sm btn--ghost" data-browser="close"' + (running ? '' : ' disabled') + '>关闭</button>';
+    // 内容没变就不重建，避免每 10 秒轮询把按钮禁用态/焦点冲掉
+    if (host.__lastHtml === html) return;
+    host.__lastHtml = html;
+    host.innerHTML = html;
   }
 
   function bindHealthControls() {
@@ -448,13 +465,107 @@
         /* api() 已 toast */
       }
       await refreshHealth();
+      // 失败时状态没变、DOM 没重建，这里兜底恢复按钮可用
+      btn.disabled = false;
     });
   }
 
   /* ======================================================================
-   * 5. hash 路由 + 页面级清理
+   * 5. 后台框架：侧边菜单收起 / 窄屏抽屉
    * ====================================================================== */
 
+  var SHELL_COLLAPSE_KEY = 'uitest.shell.sidebarCollapsed';
+
+  function initShell() {
+    var shell = $('#shell');
+    if (!shell) return;
+
+    var wide = window.matchMedia ? window.matchMedia('(min-width: 981px)') : null;
+    var collapseBtn = $('#side-collapse');
+    var toggleBtn = $('#side-toggle');
+    var mask = $('#side-mask');
+
+    function isWide() { return !wide || wide.matches; }
+
+    function applyCollapsedTitle(collapsed) {
+      if (!collapseBtn) return;
+      var text = collapsed ? '展开菜单' : '收起菜单';
+      collapseBtn.setAttribute('title', text);
+      collapseBtn.setAttribute('aria-label', text);
+    }
+
+    // 宽屏：按上次选择恢复收起态；窄屏：抽屉模式，收起态无意义
+    function applyStoredCollapse() {
+      if (!isWide()) {
+        shell.classList.remove('is-collapsed');
+        return;
+      }
+      var collapsed = lsRead(SHELL_COLLAPSE_KEY) === '1';
+      shell.classList.toggle('is-collapsed', collapsed);
+      applyCollapsedTitle(collapsed);
+    }
+
+    function closeDrawer() {
+      shell.classList.remove('is-drawer-open');
+      if (mask) mask.hidden = true;
+      if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'false');
+      document.body.style.overflow = '';
+    }
+
+    function openDrawer() {
+      shell.classList.add('is-drawer-open');
+      if (mask) mask.hidden = false;
+      if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
+      document.body.style.overflow = 'hidden';
+    }
+
+    if (collapseBtn) {
+      collapseBtn.addEventListener('click', function () {
+        var next = !shell.classList.contains('is-collapsed');
+        shell.classList.toggle('is-collapsed', next);
+        lsWrite(SHELL_COLLAPSE_KEY, next ? '1' : '0');
+        applyCollapsedTitle(next);
+      });
+    }
+
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', function () {
+        if (shell.classList.contains('is-drawer-open')) closeDrawer(); else openDrawer();
+      });
+    }
+
+    if (mask) mask.addEventListener('click', closeDrawer);
+
+    // 窄屏下点菜单跳转后自动收起抽屉（外链除外）
+    var nav = $('#nav');
+    if (nav) {
+      nav.addEventListener('click', function (e) {
+        var t = e.target && e.target.nodeType === 1 ? e.target : null;
+        if (!t || !t.closest) return;
+        var link = t.closest('a[href]');
+        if (!link || link.getAttribute('target') === '_blank') return;
+        if (!isWide()) closeDrawer();
+      });
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && shell.classList.contains('is-drawer-open')) closeDrawer();
+    });
+
+    applyStoredCollapse();
+
+    // 断点切换：抽屉必须跟着关掉，否则窄屏开着抽屉再拉宽，遮罩会一直盖住内容
+    function onBreakpointChange() {
+      closeDrawer();
+      applyStoredCollapse();
+    }
+    if (wide && wide.addEventListener) wide.addEventListener('change', onBreakpointChange);
+    else if (wide && wide.addListener) wide.addListener(onBreakpointChange);
+  }
+
+  /* ======================================================================
+   * 6. hash 路由 + 页面级清理
+   * ====================================================================== */
   var cleanups = [];
 
   // 页面注册清理函数（定时器 / EventSource 等）
@@ -481,10 +592,86 @@
     }
   }
 
+  // 只改写地址栏、不新增历史记录（用于把 #/settings 规范成 #/settings/ai）
+  function replaceHash(hash) {
+    if (String(location.hash || '') === hash) return;
+    try {
+      history.replaceState(null, '', hash);
+    } catch (e) {
+      try { location.replace(hash); } catch (e2) { location.hash = hash; }
+    }
+  }
+
   function setActiveNav(page) {
     $$('#nav .nav-item').forEach(function (a) {
       a.classList.toggle('active', a.getAttribute('data-nav') === page);
     });
+    // 二级菜单只在对应模块展开，其它页面收起，保持侧边栏整洁
+    var sub = $('#settings-sub');
+    if (sub) sub.classList.toggle('is-open', page === 'settings');
+    var csub = $('#collect-sub');
+    if (csub) csub.classList.toggle('is-open', page === 'collect');
+  }
+
+  // 面包屑：items = [{ label, href }]，最后一项是当前页（无 href）
+  function setCrumb(items) {
+    var el = $('#crumb');
+    if (!el) return;
+    var html = '';
+    items.forEach(function (it, i) {
+      if (i) html += '<span class="crumb-sep">/</span>';
+      html += it.href
+        ? '<a href="' + esc(it.href) + '">' + esc(it.label) + '</a>'
+        : '<span class="crumb-cur">' + esc(it.label) + '</span>';
+    });
+    el.innerHTML = html;
+  }
+
+  // 设置二级菜单：按 SETTINGS_SECTIONS 渲染一次（侧边栏树形导航）
+  function buildSettingsSub() {
+    var host = $('#settings-sub');
+    if (!host) return;
+    host.innerHTML = SETTINGS_SECTIONS.map(function (s) {
+      return '<a class="nav-sub-item" href="#/settings/' + esc(s.key) + '" data-sec="' + esc(s.key) +
+        '" title="' + esc(s.desc) + '">' + esc(s.label) + '</a>';
+    }).join('');
+  }
+
+  function setSettingsSub(section) {
+    $$('#settings-sub .nav-sub-item').forEach(function (a) {
+      a.classList.toggle('active', a.getAttribute('data-sec') === section);
+    });
+  }
+
+  // 接口采集二级菜单：录制接口 / 采集任务 / 产出文件 / 数据写入 / 执行日志
+  var COLLECT_SECTIONS = [
+    { key: 'captures', label: '录制接口', desc: '开始录制、查看录制会话与请求' },
+    { key: 'tasks', label: '采集任务', desc: '定时、限速、接口与写入目标' },
+    { key: 'files', label: '产出文件', desc: 'Excel / JSON / JSONL 产出下载' },
+    { key: 'sinks', label: '数据写入', desc: '落库配置的新建 / 测试 / 保存 / 删除' },
+    { key: 'runs', label: '执行日志', desc: '每次采集的请求 / 响应与写入结果' }
+  ];
+
+  function buildCollectSub() {
+    var host = $('#collect-sub');
+    if (!host) return;
+    host.innerHTML = COLLECT_SECTIONS.map(function (s) {
+      return '<a class="nav-sub-item" href="#/collect/' + esc(s.key) + '" data-sec="' + esc(s.key) +
+        '" title="' + esc(s.desc) + '">' + esc(s.label) + '</a>';
+    }).join('');
+  }
+
+  function setCollectSub(section) {
+    $$('#collect-sub .nav-sub-item').forEach(function (a) {
+      a.classList.toggle('active', a.getAttribute('data-sec') === section);
+    });
+  }
+
+  function collectSectionTitle(key) {
+    for (var i = 0; i < COLLECT_SECTIONS.length; i++) {
+      if (COLLECT_SECTIONS[i].key === key) return COLLECT_SECTIONS[i].label;
+    }
+    return '接口采集';
   }
 
   // 新建一个页面容器（路由切换时随 innerHTML 一起销毁，事件监听自动释放）
@@ -508,57 +695,92 @@
     var page = parts[0] || 'recordings';
     var id = parts[1] ? decodeURIComponent(parts[1]) : '';
     var title = '录制';
+    var crumb = [{ label: '首页', href: '#/recordings' }];
 
     if (page === 'recordings') {
       setActiveNav('recordings');
-      if (id) { title = '录制详情'; renderRecordingDetail(app, id); }
+      crumb.push({ label: '录制', href: id ? '#/recordings' : '' });
+      if (id) { title = '录制详情'; crumb.push({ label: '详情' }); renderRecordingDetail(app, id); }
       else { renderRecordings(app); }
     } else if (page === 'runs') {
       setActiveNav('runs');
       title = '运行';
-      if (id) { title = '运行详情'; renderRunDetail(app, id); }
+      crumb.push({ label: '运行', href: id ? '#/runs' : '' });
+      if (id) { title = '运行详情'; crumb.push({ label: '详情' }); renderRunDetail(app, id); }
       else { renderRuns(app); }
     } else if (page === 'elements') {
       setActiveNav('elements');
       title = '元素库';
+      crumb.push({ label: '元素库' });
       renderElements(app);
     } else if (page === 'collect') {
-      // 接口采集：录制 → 筛选 → 建任务 → 定时抓取 → 落库（实现在 collect.js）
+      // 接口采集（实现在 collect.js）：录制接口 / 采集任务 / 产出文件 / 数据写入 / 执行日志
       setActiveNav('collect');
       var csub = (parts[1] || '').toLowerCase();
       var cid = parts[2] ? decodeURIComponent(parts[2]) : '';
       var C = window.UITestCollect;
-      if (!C) {
-        title = '接口采集';
-        pageRoot(app).innerHTML = errorCard('collect.js 未加载，请刷新页面');
-      } else if (csub === 'capture' && cid) {
-        title = '接口录制结果';
-        C.renderCapture(app, cid);
-      } else if (csub === 'task' && cid) {
-        title = '采集任务';
-        C.renderTask(app, cid);
-      } else if (csub === 'run' && cid) {
-        title = '采集运行';
-        C.renderRun(app, cid);
+
+      // 详情页：#/collect/capture/{id} · /task/{id} · /run/{id}
+      var DETAIL_OF = { capture: 'captures', task: 'tasks', run: 'runs' };
+      var LIST_KEYS = ['captures', 'tasks', 'files', 'sinks', 'runs'];
+      var detail = DETAIL_OF[csub] || '';
+      var sec = detail || csub || 'captures';
+      if (detail && !cid) detail = '';                 // 缺 id 就当列表页
+      if (LIST_KEYS.indexOf(sec) < 0) sec = 'captures';
+      if (sec !== csub) replaceHash('#/collect/' + sec);
+
+      setCollectSub(sec);
+      if (detail) {
+        var detailTitle = csub === 'capture' ? '录制结果' : (csub === 'task' ? '任务配置' : '执行日志详情');
+        title = detailTitle;
+        crumb.push({ label: '接口采集', href: '#/collect/captures' },
+          { label: collectSectionTitle(sec), href: '#/collect/' + sec },
+          { label: detailTitle });
       } else {
-        title = '接口采集';
-        C.renderList(app);
+        title = collectSectionTitle(sec);
+        crumb.push({ label: '接口采集', href: '#/collect/captures' }, { label: title });
+      }
+
+      if (!C) {
+        pageRoot(app).innerHTML = errorCard('collect.js 未加载，请刷新页面');
+      } else if (detail === 'captures') {
+        C.renderCapture(app, cid);
+      } else if (detail === 'tasks') {
+        C.renderTask(app, cid);
+      } else if (detail === 'runs') {
+        C.renderRun(app, cid);
+      } else if (sec === 'tasks') {
+        C.renderTasks(app);
+      } else if (sec === 'files') {
+        C.renderFiles(app);
+      } else if (sec === 'sinks') {
+        C.renderSinks(app);
+      } else if (sec === 'runs') {
+        C.renderRuns(app);
+      } else {
+        C.renderCaptures(app);
       }
     } else if (page === 'settings') {
       setActiveNav('settings');
       // 设置拆成独立子菜单页：#/settings/ai|browser|assist|backups|help
+      // 缺省/非法分区直接回落「AI 数据生成」，并用 replaceState 规范化 URL：
+      // 不压历史记录，否则用户在 #/settings 上按后退会被反复弹回，退不出去。
       var allowed = ['ai', 'browser', 'assist', 'backups', 'help'];
-      if (!id) { location.hash = '#/settings/ai'; return; }
-      var sec = id.toLowerCase();
-      if (allowed.indexOf(sec) < 0) { location.hash = '#/settings/ai'; return; }
+      var raw = String(id || '').toLowerCase();
+      var sec = allowed.indexOf(raw) < 0 ? 'ai' : raw;
+      if (sec !== raw) replaceHash('#/settings/' + sec);
       title = '设置 · ' + settingsSectionTitle(sec);
+      crumb.push({ label: '设置', href: '#/settings/ai' }, { label: settingsSectionTitle(sec) });
+      setSettingsSub(sec);
       renderSettings(app, sec);
     } else {
       setActiveNav('');
       title = '页面不存在';
+      crumb.push({ label: '页面不存在' });
       pageRoot(app).innerHTML = notFoundCard();
     }
 
+    setCrumb(crumb);
     document.title = title + ' · UI 自动化测试平台';
   }
 
@@ -590,15 +812,14 @@
   }
 
   /**
-   * 给卡片接上浮动/拖动/缩放/收起能力。
+   * 给卡片接上浮动/拖动/缩放/收起能力（面板始终悬浮，位置与尺寸记忆在 localStorage）。
    * @param {HTMLElement} el 目标卡片（需有 .card-head 作为拖动手柄）
-   * @param {object} opts { key, grid, gridClass, defaultFloating, defaultPos }
+   * @param {object} opts { key, grid, gridClass, defaultPos }
    */
   function applyFloatCard(el, opts) {
     if (!el || !el.classList) return;
     opts = opts || {};
     var key = opts.key || 'card';
-    var FLAG_KEY = 'uitest.float.' + key;
     var POS_KEY = 'uitest.pos.' + key;
     var head = el.querySelector('.card-head') || el.firstElementChild;
     var grid = opts.grid || el.parentElement;
@@ -615,7 +836,7 @@
     }
 
     function syncGrid() {
-      if (grid && opts.gridClass) grid.classList.toggle(opts.gridClass, isFloating());
+      if (grid && opts.gridClass) grid.classList.add(opts.gridClass);
     }
 
     function setCollapsed(on) {
@@ -624,31 +845,23 @@
       if (b) b.textContent = on ? '展开' : '收起';
     }
 
-    function setFloating(on, silent) {
-      if (on) {
-        var pos = jsonRead(POS_KEY) || {};
-        var vw = window.innerWidth, vh = window.innerHeight;
-        var def = opts.defaultPos || {};
-        var w = clampPx(pos.w || def.w || Math.round(vw * 0.28), FLOAT_MIN_W, Math.max(FLOAT_MIN_W, vw - 8));
-        var h = clampPx(pos.h || def.h || Math.round(vh * 0.62), FLOAT_MIN_H, Math.max(FLOAT_MIN_H, vh - 8));
-        var l = typeof pos.l === 'number' ? pos.l : (def.l === 'right' ? vw - w - 24 : (def.l || vw - w - 24));
-        var t = typeof pos.t === 'number' ? pos.t : (def.t || 96);
-        el.classList.add('is-floating');
-        el.classList.remove('is-collapsed');
-        el.style.width = w + 'px';
-        el.style.height = h + 'px';
-        el.style.left = clampPx(l, 4, Math.max(4, vw - w - 4)) + 'px';
-        el.style.top = clampPx(t, 4, Math.max(4, vh - h - 4)) + 'px';
-        setCollapsed(false);
-      } else {
-        el.classList.remove('is-floating');
-        el.style.width = '';
-        el.style.height = '';
-        el.style.left = '';
-        el.style.top = '';
-      }
+    // 铺开成浮窗：位置/尺寸优先用上次记住的，否则用默认值（贴右侧）
+    function floatCard() {
+      var pos = jsonRead(POS_KEY) || {};
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var def = opts.defaultPos || {};
+      var w = clampPx(pos.w || def.w || Math.round(vw * 0.28), FLOAT_MIN_W, Math.max(FLOAT_MIN_W, vw - 8));
+      var h = clampPx(pos.h || def.h || Math.round(vh * 0.62), FLOAT_MIN_H, Math.max(FLOAT_MIN_H, vh - 8));
+      var l = typeof pos.l === 'number' ? pos.l : (def.l === 'right' ? vw - w - 24 : (def.l || vw - w - 24));
+      var t = typeof pos.t === 'number' ? pos.t : (def.t || 96);
+      el.classList.add('is-floating');
+      el.classList.remove('is-collapsed');
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.left = clampPx(l, 4, Math.max(4, vw - w - 4)) + 'px';
+      el.style.top = clampPx(t, 4, Math.max(4, vh - h - 4)) + 'px';
+      setCollapsed(false);
       syncGrid();
-      if (!silent) lsWrite(FLAG_KEY, on ? '1' : '0');
     }
 
     // 头部工具按钮：只要「收起」（面板始终悬浮，不再提供停靠）
@@ -720,11 +933,15 @@
       });
       ro.observe(el);
       el.__floatRO = ro;
+      // 页面切换后元素被销毁，观察器要一起断开，避免反复进详情页累积
+      addCleanup(function () {
+        try { ro.disconnect(); } catch (e) { /* ignore */ }
+        el.__floatRO = null;
+      });
     }
 
-    // 面板始终悬浮（最小化/尺寸/位置来自 localStorage，不存在"停靠"状态）
-    setFloating(true, true);
-    return { setFloating: setFloating, setCollapsed: setCollapsed, isFloating: isFloating };
+    // 面板始终悬浮（位置/尺寸来自 localStorage，不存在"停靠"状态）
+    floatCard();
   }
 
   /* ======================================================================
@@ -803,7 +1020,7 @@
   function renderRecordings(app) {
     var root = pageRoot(app);
 
-    var state = { items: [], q: '', loading: true, debounce: null, page: 1, sel: {} };
+    var state = { items: [], q: '', debounce: null, page: 1, sel: {} };
 
     root.innerHTML =
       '<div class="page-head">' +
@@ -884,7 +1101,6 @@
       var all = filterItems(state.items, state.q);
       var pg = paginate(all, state.page, pageSize());
       state.page = pg.page;
-      state.all = all;
       pruneSel(state.sel, state.items, function (it) { return it.id; });
       var picked = selCount(state.sel);
       countEl.textContent = state.items.length ? ('共 ' + all.length + ' 条' + (state.q ? '（已过滤）' : '')) : '';
@@ -937,10 +1153,8 @@
       try {
         var res = await api('GET', '/api/recordings?q=' + encodeURIComponent(state.q || ''), undefined, { silent: true });
         state.items = apiItems(res);
-        state.loading = false;
         paint();
       } catch (e) {
-        state.loading = false;
         countEl.textContent = '';
         tbody.innerHTML = '<tr><td colspan="7" class="cell-state cell-state--error">' +
           esc(e.message || '加载失败') +
@@ -1555,7 +1769,6 @@
         key: 'data',
         grid: $('.detail-grid', root),
         gridClass: 'has-floating-data',
-        defaultFloating: true,
         defaultPos: { l: 'right', t: 300, w: 380, h: 540 }
       });
     }
@@ -1618,7 +1831,6 @@
         key: 'data',
         grid: $('.detail-grid', root),
         gridClass: 'has-floating-data',
-        defaultFloating: true,
         defaultPos: { l: 'right', t: 300, w: 380, h: 540 }
       });
     }
@@ -2656,54 +2868,32 @@
     var logHead = $('#logs-head', root);
     var dragState = null;
 
-    function lsGet(key) {
-      try { return localStorage.getItem(key); } catch (e) { return null; }
-    }
-    function lsSet(key, val) {
-      try { localStorage.setItem(key, val); } catch (e) { /* 隐私模式忽略 */ }
-    }
-    function loadPos() {
-      try {
-        var v = JSON.parse(lsGet(LOG_POS_KEY) || 'null');
-        return v && typeof v === 'object' ? v : null;
-      } catch (e) { return null; }
-    }
-    function clampNum(v, min, max) {
-      return Math.max(min, Math.min(max, v));
-    }
-
     function isLogFloating() {
       return !!(logCard && logCard.classList.contains('is-floating'));
     }
 
-    function setLogFloating(on, silent) {
+    // 面板始终悬浮：按记住的位置/尺寸铺开（不提供停靠模式）
+    function floatLogCard() {
       if (!logCard) return;
-      if (on) {
-        var pos = loadPos() || {};
-        var vw = window.innerWidth, vh = window.innerHeight;
-        var width = clampNum(pos.w || Math.round(vw * 0.34), 320, Math.max(320, vw - 16));
-        var height = clampNum(pos.h || Math.round(vh * 0.42), 220, Math.max(220, vh - 16));
-        var left = typeof pos.l === 'number' ? pos.l : (vw - width - 24);
-        var top = typeof pos.t === 'number' ? pos.t : (vh - height - 24);
-        logCard.classList.add('is-floating');
-        logCard.classList.remove('is-collapsed');
-        logCard.style.width = width + 'px';
-        logCard.style.height = height + 'px';
-        logCard.style.left = clampNum(left, 4, Math.max(4, vw - width - 4)) + 'px';
-        logCard.style.top = clampNum(top, 4, Math.max(4, vh - height - 4)) + 'px';
-        setLogCollapsed(false);
-      } else {
-        logCard.classList.remove('is-floating');
-        logCard.style.width = '';
-        logCard.style.height = '';
-        logCard.style.left = '';
-        logCard.style.top = '';
-      }
+      var pos = jsonRead(LOG_POS_KEY) || {};
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var width = clampPx(pos.w || Math.round(vw * 0.34), 320, Math.max(320, vw - 16));
+      var height = clampPx(pos.h || Math.round(vh * 0.42), 220, Math.max(220, vh - 16));
+      var left = typeof pos.l === 'number' ? pos.l : (vw - width - 24);
+      var top = typeof pos.t === 'number' ? pos.t : (vh - height - 24);
+      logCard.classList.add('is-floating');
+      logCard.classList.remove('is-collapsed');
+      logCard.style.width = width + 'px';
+      logCard.style.height = height + 'px';
+      logCard.style.left = clampPx(left, 4, Math.max(4, vw - width - 4)) + 'px';
+      logCard.style.top = clampPx(top, 4, Math.max(4, vh - height - 4)) + 'px';
+      setLogCollapsed(false);
+
       // 浮窗脱离文档流后，外层两列网格会留一块空白，这里切成单列让步骤表占满
       var grid = logCard.parentElement;
-      if (grid && grid.classList.contains('split')) grid.classList.toggle('has-floating-log', !!on);
+      if (grid && grid.classList.contains('split')) grid.classList.add('has-floating-log');
 
-      // 浮窗出现/消失后把日志滚到底，避免停在半截
+      // 铺开后把日志滚到底，避免停在半截
       var logsEl = $('#logs', root);
       if (logsEl && ui.autoScroll) logsEl.scrollTop = logsEl.scrollHeight;
     }
@@ -2718,7 +2908,7 @@
     function saveLogPos() {
       if (!logCard || !isLogFloating()) return;
       var r = logCard.getBoundingClientRect();
-      lsSet(LOG_POS_KEY, JSON.stringify({
+      lsWrite(LOG_POS_KEY, JSON.stringify({
         l: Math.round(r.left), t: Math.round(r.top),
         w: Math.round(r.width), h: Math.round(r.height)
       }));
@@ -2727,8 +2917,8 @@
     function onLogDragMove(ev) {
       if (!dragState || !logCard) return;
       var rect = logCard.getBoundingClientRect();
-      var left = clampNum(ev.clientX - dragState.dx, 4, Math.max(4, window.innerWidth - rect.width - 4));
-      var top = clampNum(ev.clientY - dragState.dy, 4, Math.max(4, window.innerHeight - rect.height - 4));
+      var left = clampPx(ev.clientX - dragState.dx, 4, Math.max(4, window.innerWidth - rect.width - 4));
+      var top = clampPx(ev.clientY - dragState.dy, 4, Math.max(4, window.innerHeight - rect.height - 4));
       logCard.style.left = left + 'px';
       logCard.style.top = top + 'px';
     }
@@ -2763,9 +2953,10 @@
       });
 
       // 手动拖右下角缩放后记住尺寸
+      var roTimer = null;
+      var ro = null;
       if (typeof window.ResizeObserver === 'function') {
-        var roTimer = null;
-        var ro = new ResizeObserver(function () {
+        ro = new ResizeObserver(function () {
           if (!isLogFloating()) return;
           if (roTimer) clearTimeout(roTimer);
           roTimer = setTimeout(saveLogPos, 300);
@@ -2774,11 +2965,19 @@
       }
 
       // 窗口尺寸变化时把浮窗夹回可视区
-      window.addEventListener('resize', function () {
+      function onLogResize() {
         if (!isLogFloating()) return;
         var r = logCard.getBoundingClientRect();
-        logCard.style.left = clampNum(r.left, 4, Math.max(4, window.innerWidth - r.width - 4)) + 'px';
-        logCard.style.top = clampNum(r.top, 4, Math.max(4, window.innerHeight - r.height - 4)) + 'px';
+        logCard.style.left = clampPx(r.left, 4, Math.max(4, window.innerWidth - r.width - 4)) + 'px';
+        logCard.style.top = clampPx(r.top, 4, Math.max(4, window.innerHeight - r.height - 4)) + 'px';
+      }
+      window.addEventListener('resize', onLogResize);
+
+      // 离开详情页时解绑，避免监听器与观察器随页面切换不断累积
+      addCleanup(function () {
+        window.removeEventListener('resize', onLogResize);
+        if (roTimer) clearTimeout(roTimer);
+        if (ro) { try { ro.disconnect(); } catch (e) { /* ignore */ } }
       });
     }
 
@@ -2787,7 +2986,7 @@
     });
 
     // 实时日志面板始终悬浮（可拖动/缩放/收起，位置与尺寸记忆）
-    setLogFloating(true, true);
+    floatLogCard();
 
     refresh({ silent: false });
   }
@@ -3041,11 +3240,7 @@
   }
 
   /* ======================================================================
-   * 6.6 设置  #/settings
-   * ====================================================================== */
-
-  /* ======================================================================
-   * 6.4 设置（拆成 5 个独立子菜单页）
+   * 6.6 设置  #/settings（拆成 5 个独立子菜单页）
    *   #/settings/ai       AI 数据生成
    *   #/settings/browser  内置浏览器
    *   #/settings/assist   辅助功能
@@ -3057,6 +3252,7 @@
     { key: 'ai', label: 'AI 数据生成', desc: 'OpenAI 兼容接口、模型与超时' },
     { key: 'browser', label: '内置浏览器', desc: '内核、启动参数与诊断' },
     { key: 'assist', label: '辅助功能', desc: '字段名、锚点提醒、uid 自动刷新' },
+    { key: 'notify', label: '运行通知', desc: '采集任务成功 / 失败推送到企业微信群' },
     { key: 'backups', label: '数据快照', desc: '备份列表与一键恢复' },
     { key: 'help', label: '使用说明', desc: '四步上手' }
   ];
@@ -3082,7 +3278,7 @@
 
     root.innerHTML =
       '<div class="page-head">' +
-      '<div><h1>设置<span class="page-head-sec">· ' + esc(settingsSectionTitle(sec)) + '</span></h1>' +
+      '<div><h1>设置</h1>' +
       '<p class="sub">' + esc((SETTINGS_SECTIONS.filter(function (x) { return x.key === sec; })[0] || {}).desc || '') + '</p></div>' +
       '<div class="head-actions">' +
       (sec === 'help' ? '' : '<button class="btn" data-act="reload">重新读取</button>') +
@@ -3202,6 +3398,43 @@
         saveBarHtml();
     }
 
+    /* ---- 运行通知（企业微信群机器人，全局） ---- */
+    function notifyCardHtml(s) {
+      var n = s.notify || {};
+      function on(v) { return v === false ? false : true; }
+      return '<section class="card">' +
+        '<div class="card-head"><h2>运行通知</h2>' +
+        '<span class="count-pill">所有采集任务共用</span></div>' +
+        '<div class="card-body">' +
+        '<div class="field-hint">采集任务跑完（成功 / 失败）自动往企业微信群推一条消息。' +
+        'Webhook 在企业微信群 → 右上角设置 → <b>群机器人</b> → 添加 → 复制地址。</div>' +
+        '<div class="field"><label class="check-line"><input type="checkbox" id="s-nt-on"' +
+        (n.enabled ? ' checked' : '') + '><span><b>启用运行通知</b></span></label></div>' +
+        '<div class="field"><label>Webhook 地址</label>' +
+        '<input class="input input--mono" id="s-nt-url" value="' + esc(n.webhook || '') +
+        '" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label class="check-line"><input type="checkbox" id="s-nt-ok"' +
+        (on(n.on_success) ? ' checked' : '') + '><span>成功时推送</span></label></div>' +
+        '<div class="field"><label class="check-line"><input type="checkbox" id="s-nt-fail"' +
+        (on(n.on_failure) ? ' checked' : '') + '><span>失败时推送</span></label></div>' +
+        '<div class="field"><label>@ 谁（逗号分隔，all = 所有人）</label>' +
+        '<input class="input" id="s-nt-at" value="' + esc((n.mentioned || []).join(',')) +
+        '" placeholder="留空不 @ 人"></div>' +
+        '<div class="field"><label>详情链接前缀（可选）</label>' +
+        '<input class="input input--mono" id="s-nt-base" value="' + esc(n.base_url || '') +
+        '" placeholder="http://127.0.0.1:8490"></div>' +
+        '</div>' +
+        '<div class="head-actions" style="margin-top:8px">' +
+        '<button class="btn btn--sm" data-act="test-notify">发一条测试</button>' +
+        '<span class="field-hint" id="nt-test-out"></span>' +
+        '</div>' +
+        '<div class="field-hint" style="margin-top:10px">推送是异步的：失败只会在该次「运行日志」里记一条 warn，不影响采集结果；' +
+        '取消运行不推送。企业微信群机器人限流 20 条/分钟，任务很密时建议只留「失败时推送」。</div>' +
+        '</div></section>' +
+        saveBarHtml();
+    }
+
     /* ---- 数据快照 ---- */
     function backupSectionHtml() {
       var items = state.backups;
@@ -3250,6 +3483,7 @@
       if (sec === 'ai') return aiCardHtml(s);
       if (sec === 'browser') return browserCardHtml(s);
       if (sec === 'assist') return assistCardHtml(s);
+      if (sec === 'notify') return notifyCardHtml(s);
       if (sec === 'backups') return backupSectionHtml();
       return helpHtml();
     }
@@ -3325,6 +3559,16 @@
           stable_id_hint: checked('s-assist-testid'),
           auto_rebind_uid: checked('s-assist-rebind')
         };
+      } else if (sec === 'notify') {
+        var ats = read('s-nt-at').split(/[,，\s]+/).filter(function (x) { return !!x; });
+        payload.notify = {
+          enabled: checked('s-nt-on'),
+          webhook: read('s-nt-url'),
+          on_success: checked('s-nt-ok'),
+          on_failure: checked('s-nt-fail'),
+          mentioned: ats,
+          base_url: read('s-nt-base')
+        };
       } else {
         return;
       }
@@ -3345,6 +3589,7 @@
       var act = btn.getAttribute('data-act');
       if (act === 'reload') { load(); return; }
       if (act === 'save') { save(); return; }
+      if (act === 'test-notify') { testNotify(); return; }
       if (act === 'diagnose') { diagnose(); return; }
       if (act === 'reload-backups') { loadBackups(); return; }
       if (act === 'restore-backup') {
@@ -3366,6 +3611,22 @@
       }
     });
 
+    /** 发一条企业微信测试消息（先保存当前表单，再让服务端按已存设置发） */
+    async function testNotify() {
+      var out = $('#nt-test-out', root);
+      if (out) out.textContent = '正在保存并发送…';
+      await save();
+      try {
+        var r = await api('POST', '/api/settings/notify/test', {});
+        out = $('#nt-test-out', root);
+        if (out) out.textContent = '✔ ' + ((r && r.message) || '已发送');
+        toast('测试消息已发送，去企业微信群看看', 'success');
+      } catch (e) {
+        out = $('#nt-test-out', root);
+        if (out) out.textContent = '✘ 发送失败（原因见上方提示）';
+      }
+    }
+
     /** 诊断：真实开一个页面，把内核/参数/探测结果摊出来 */
     async function diagnose() {
       var out = $('#diagnose-out', root);
@@ -3373,7 +3634,9 @@
       out.classList.remove('hidden');
       out.textContent = '诊断中…（会真实打开一个页面）';
       try {
-        var r = await api('GET', '/api/browser/diagnose?url=' + encodeURIComponent('http://127.0.0.1:8490/demo/'));
+        // 用当前访问地址（可能是局域网 IP / 自定义端口），别写死 127.0.0.1
+        var probeURL = (location.origin || 'http://127.0.0.1:8490') + '/demo/';
+        var r = await api('GET', '/api/browser/diagnose?url=' + encodeURIComponent(probeURL));
         var p = r.probe || {};
         var lines = [
           '内核路径   : ' + (r.executable || '（未探测到）'),
@@ -3401,10 +3664,11 @@
   }
 
   /* ======================================================================
-   * 启动
+   * 7. 对外暴露 + 启动
    * ====================================================================== */
 
-  // 把控制台的通用能力暴露给 collect.js（接口采集页复用同一套接口封装/弹窗/分页）
+  // 把控制台的通用能力暴露给 collect.js（接口采集页复用同一套接口封装/弹窗/格式化）
+  // 只保留 collect.js 实际调用的项，避免维护两份"半公开 API"
   window.UITest = {
     api: api,
     toast: toast,
@@ -3414,27 +3678,23 @@
     emptyCard: emptyCard,
     loadingCard: loadingCard,
     errorCard: errorCard,
-    field: field,
     fmtDateTime: fmtDateTime,
-    fmtTime: fmtTime,
     fmtClock: fmtClock,
     relTime: relTime,
-    fmtDuration: fmtDuration,
-    tagChips: tagChips,
-    parseTags: parseTags,
     apiItems: apiItems,
     levelClass: levelClass,
     addCleanup: addCleanup,
     navigate: navigate,
-    pageSize: pageSize,
-    setPageSize: setPageSize,
-    paginate: paginate,
-    pagerHtml: pagerHtml,
     lsRead: lsRead,
     lsWrite: lsWrite
   };
 
   function boot() {
+    // 后台框架：侧边菜单（收起 / 抽屉）与二级菜单
+    initShell();
+    buildSettingsSub();
+    buildCollectSub();
+
     bindHealthControls();
     refreshHealth();
     Health.timer = setInterval(refreshHealth, 10000);

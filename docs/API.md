@@ -12,6 +12,8 @@
 | 异步 | `POST /api/runs`、`POST /api/collect/tasks/{id}/run` 立即返回 `queued`，进度用 SSE 订阅 |
 | SSE | `GET …/events` 推 `data: {"type":"log\|step\|status",…}`，结束时 `data: {"type":"end"}` |
 | 清空类 | 一律要求 `?all=1`，否则 400（防脚本误删） |
+| 未注册接口 | `/api/` 下未注册的路径返回 `404` + `{"error":"接口不存在：…"}`（JSON，而不是 HTML 错误页） |
+| 方法不对 | 路径存在但方法不支持时返回 `405` + `{"error":"接口 … 不支持 …，可用：…"}`，并带 `Allow` 响应头 |
 
 ```bash
 curl -s http://127.0.0.1:8490/api/health
@@ -202,8 +204,9 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/settings` | `{ai:{base_url,model,has_key,key_hint,timeout_sec}, browser:{executable,headless,step_delay_ms,action_timeout_ms,no_sandbox,debug_url,kernel_dir,extra_args,resolved_flags,after_run}, assist:{auto_data_key,stable_id_hint,auto_rebind_uid}, server:{port,version}}` |
-| PUT | `/api/settings` | 同上（`ai.api_key` 只写不读，留空表示不修改） |
+| GET | `/api/settings` | `{ai:{base_url,model,has_key,key_hint,timeout_sec}, browser:{…}, assist:{auto_data_key,stable_id_hint,auto_rebind_uid}, notify:{enabled,webhook,on_success,on_failure,mentioned,base_url}, server:{port,version}}` |
+| PUT | `/api/settings` | 同上（`ai.api_key` 只写不读，留空表示不修改）；`notify` 是**全局运行通知**，所有采集任务共用 |
+| POST | `/api/settings/notify/test` | 用已保存的企业微信机器人发一条测试消息：`{ok, message, content}` |
 | GET | `/api/health` | `{ok, version, recordings, runs, browser_running, assist{…}, harvest_tasks, harvest_runs}` |
 | GET | `/api/backups` | 数据快照列表（名称/时间/录制数/运行数/大小） |
 | POST | `/api/backups/{name}/restore` | 用快照覆盖当前数据（覆盖前自动再存一份，可回退） |
@@ -234,7 +237,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `method` / `url` / `host` / `path` / `query` | 请求行信息（后三个由服务端从 URL 拆出） |
 | `status` / `type` / `kind` | 状态码 / CDP 类型（XHR·Fetch·Document）/ 归一类别（api·page·static·other） |
 | `bytes` / `duration_ms` | 响应字节数 / 耗时 |
-| `req_headers` / `post_data` | 请求头 / 请求体（截断；Cookie·UA·Referer 由会话统一处理，不放这里） |
+| `req_headers` / `post_data` | 请求头 / 请求体（`req_headers` **只含 `Content-Type`**：Cookie / Authorization / User-Agent / Referer 等登录态头一律不录，运行期由「前置登录 + 浏览器会话」提供） |
 | `has_body` / `body_preview` / `body_size` / `body_truncated` | 响应体预览（用于筛选与字段识别） |
 | `page_url` / `at` | 触发页面（默认 Referer）/ 录制时刻 |
 
@@ -247,7 +250,10 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `schedule` | `{mode: interval\|daily\|manual, every_seconds, times:["09:00"], weekdays:[1,3,5], jitter_percent}` |
 | `throttle` | `{min_interval_ms, jitter_percent, timeout_ms, retries, backoff_ms, max_fail_streak, max_pages_cap}`；`max_pages_cap` 是**分页默认上限**，只在接口 `max_pages` 留空时生效 |
 | `sink` | `{driver: sqlite\|mysql\|postgres\|xlsx\|json\|jsonl, dsn, table, mode: append\|upsert, key_column, batch_size}` |
-| `session` | `{mode: browser\|cookie\|none, cookie, user_agent, referer, host}` |
+| `session` | `{host, header_mode}`；会话只有一种——内置浏览器登录态：抓取时 Cookie 与请求头全部来自浏览器（先跑前置登录），只有 URL / 请求体按接口配置。`host` 留空 = 起始页/第一个接口的 origin；`header_mode`：`all`（默认，除 `Content-Type`/`Content-Length`/`Cookie` 这类请求参数外全部共享）/ `auth`（只共享鉴权头）/ `off`（只用录制值）。老字段 `mode`/`cookie`/`user_agent`/`referer`/`token` 仍可读入，运行时一律按浏览器会话处理 |
+| `prelogin` | 可选：`{enabled, recording_id, recording_name, mode: always\|on-fail, timeout_seconds, continue_on_error, vars}`；运行前先回放一段 UI 自动化（登录）再导出会话；`vars` 是登录流程的数据（密码框录制时脱敏成 `{{password}}`，必须用 `vars.password` 注入） |
+| `notify` | **（已废弃，改用系统设置）** 通知现在统一在「设置 → 运行通知」里配：`PUT /api/settings` 的 `notify = {enabled, webhook, on_success, on_failure, mentioned[], base_url}` |
+| `common` | 公共参数：`{params:{k:v}, headers:{k:v}, script}`。`params` GET/DELETE 进 query、POST/PUT/PATCH 并进 JSON body；`headers` 会被前置登录后的浏览器同名头覆盖；`script` 在登录后的浏览器页面里执行，返回 JSON（`{"params":{…},"headers":{…}}` 或 `{"token":"…"}`）。优先级：公共参数 → 接口配置 → 浏览器头 → 脚本 |
 | `status` | `active` / `paused` |
 | `next_run_at` / `last_run_at` / `last_status` / `last_written` / `run_count` / `fail_streak` / `schedule_text` / `sink_file` | 服务端维护 |
 
@@ -260,7 +266,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `pagination` | 分页策略（见下表），建任务时自动探测 |
 | `records_path` | 记录数组的 JSON 路径（如 `data.list`），留空自动识别 |
 | `fields[]` | `{column, path}`，`path` 支持 `a.b[0].c` 与 `@now @date @timestamp @url @endpoint @page` |
-| `sample_status` / `sample_body` | 录制时的样本（仅用于预览、字段与分页识别） |
+| `sample_body` | 录制时的响应样本（只服务「从样本重新识别字段 / 分页」，不展示、不参与抓取） |
 | `pages` / `page_param` / `page_start` / `page_step` | **旧版扁平字段**，仅在读取老数据时由 `Normalize` 迁移到 `pagination` |
 
 `pagination`
@@ -312,21 +318,38 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 |---|---|---|
 | GET | `/api/collect/tasks?q=` | 任务列表 |
 | POST | `/api/collect/tasks` | 新建。① 传 `endpoints[]`；② 传 `capture_id` + `request_ids[]`（推荐，自动带样本、字段映射与分页探测） |
-| GET | `/api/collect/tasks/{id}` | 详情（含 `schedule_text`、`sink_file`、`endpoints[].sample_body`） |
-| PATCH | `/api/collect/tasks/{id}` | 局部更新：`name/description/start_url/status/schedule/throttle/sink/session/endpoints` |
+| GET | `/api/collect/tasks/{id}` | 详情（含 `schedule_text`、`sink_file`、`sink_target`、`endpoints[].sample_body`）。每个接口还带**录制快照**：`sample_headers`（录制时的原始请求头，明文含 Cookie）、`sample_req_body`、`sample_page_url`、`sample_at`、`created_from`（录制请求 id） |
+| PATCH | `/api/collect/tasks/{id}` | 局部更新：`name/description/start_url/status/schedule/throttle/sink/session/endpoints`，以及 `split_by_endpoint`（每接口分表）/ `sink_profile_id`；`endpoints[].sink` 可给单个接口单独指定 `{"table":"..."}` |
 | DELETE | `/api/collect/tasks/{id}` | 删除任务（连带运行记录） |
 | POST | `/api/collect/tasks/{id}/run` | 立即执行 → run |
-| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit}` → `{items:[{status, records_path, columns, rows, pagination, total, estimated_pages, error, hint}]}` |
+| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit, endpoint_id}` → `{items:[{status, records_path, columns, rows, pagination, total, estimated_pages, error, hint, warning?}]}`。`warning` 仅在试抓降级（如没有可用登录态、按无登录态试抓）时出现；`error` 为空即视为成功；`endpoint_id` 传了就只试抓那一个接口 |
 | POST | `/api/collect/tasks/{id}/analyze` | 用保存的样本重算字段**与分页**：`{endpoint_id, records_path?}` |
 | POST | `/api/collect/tasks/{id}/detect-pagination` | 只重算分页：`{endpoint_id}` → `{pagination, pagination_text, hint}` |
 | POST | `/api/collect/tasks/{id}/test-sink` | 试连落库目标（只建连接，不写数据） |
+| POST | `/api/collect/tasks/{id}/test-notify` | （兼容保留）用系统设置里的企业微信机器人发一条测试消息 |
+| POST | `/api/collect/tasks/{id}/token` | 立刻按当前登录状态读一次 Token（`browser` 来源会真的打开内置浏览器，不吃缓存）；返回 `{header, prefix, token, length, preview}` |
+| POST | `/api/collect/tasks/{id}/prelogin` | 立刻跑一遍「前置登录」的 UI 自动化录制，并导出会话；返回 `{ok, run_id, elapsed_ms, cookie_count, token_preview, error, session_error}` |
+| POST | `/api/collect/tasks/{id}/selftest` | 自检：`{run_prelogin}` → `{ok, steps:[{title, ok, detail}]}`，把「前置登录 → 导出会话 → 真发一次请求」逐步报告 |
+
+详情里额外带：`sink_target`（人可读的写入目标）、`split_by_endpoint`、`sink_profile_id`、`endpoint_sinks{endpoint_id: {driver, table, target}}`。
+
+**落库配置（数据写入页）**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/collect/sinks` | 配置列表：`{items:[{id, name, driver, dsn, table, mode, key_column, batch_size, note, target, file, created_at, updated_at}]}` |
+| POST | `/api/collect/sinks` | 新建 → 保存后的配置（`name` 必填；`driver/dsn/table/mode/key_column/batch_size` 直接放同一层） |
+| GET | `/api/collect/sinks/{id}` | 单条 |
+| PUT | `/api/collect/sinks/{id}` | 整体覆盖保存 |
+| DELETE | `/api/collect/sinks/{id}` | 删除（已复制进任务的配置值不受影响） |
+| POST | `/api/collect/sinks/test` | 试连：传配置字段，或只传 `{id}`；→ `{ok, message, target}` |
 
 **运行 / 产出 / 选项**
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/collect/runs?task_id=&limit=` | 运行列表 |
-| GET | `/api/collect/runs/{id}` | 运行详情（接口结果 + 日志） |
+| GET | `/api/collect/runs/{id}` | 运行详情（接口结果 + 日志）。`logs[]` 里每次请求都有两行 `level="http"` 的记录：`→ 方法 URL #第几次` + `请求头/请求体`，以及 `← 状态码 大小` + 响应体；**明文不脱敏**（Cookie / Authorization 原样）；**请求报文永远完整**，响应体单条 32KB、单次运行响应体总量 1MB 上限，整轮日志 2MB 兜底（超出从最老的日志开始丢）。另有 `level="sql"` 的落库 SQL 行。每个接口还带 `target`（写入到哪张表/哪个文件） |
 | POST | `/api/collect/runs/{id}/cancel` | 取消 |
 | GET | `/api/collect/runs/{id}/events` | SSE 实时日志 |
 | POST | `/api/collect/runs/batch-delete` · `DELETE /api/collect/runs?all=1` | 批量删 / 清空 |
@@ -417,7 +440,12 @@ POST /api/collect/tasks
 标签页命令走页面级端点 `ws://127.0.0.1:<port>/devtools/page/<targetId>`
 （新版 Chromium 的浏览器级扁平化会话不返回会话命令响应，实测不适用）。
 
-### 7.4 启动自愈与诊断
+### 7.4 静态文件与产出目录
+
+`/data/runs/` 只提供具体文件（截图、报告等），**不提供目录浏览**：
+请求目录本身（如 `/data/runs/`）返回 404，避免把整次运行的产出清单暴露出去。
+
+### 7.5 启动自愈与诊断
 
 `POST /api/browser/launch` 按候选参数组合逐组尝试，每组**真开一个页面读 `document.title`** 判断渲染进程是否可用，
 可用组合写入 `settings.browser.resolved_flags` 复用；全部失败时返回错误并附最后一组参数。

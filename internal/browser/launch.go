@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -383,19 +384,56 @@ func (m *Manager) attemptProfileOr() string {
 }
 
 // cleanStaleRetryProfiles 清理历史上重试用的临时 profile 目录（尽力而为，失败忽略）。
-// 这些目录里的 SingletonLock 若残留，会让新启动的浏览器"委托给已有会话"直接退出。
+//
+// 这些目录里的 SingletonLock 若残留，会让新启动的浏览器"委托给已有会话"直接退出；
+// 同时每个目录几十 MB，不清理会一直堆在数据目录里（实测一台机器上 27 个、500+ MB）。
+//
+// 注意 glob 的基准必须是去掉重试后缀的 baseProfile：当前 profile 目录本身就是
+// browser-profile-retry2-123 这种名字时，拿它再拼 "-retry*" 永远匹配不到东西。
 func (m *Manager) cleanStaleRetryProfiles() {
-	matches, err := filepath.Glob(m.profileDir + "-retry*")
-	if err != nil {
-		return
+	base := m.baseProfile
+	if base == "" {
+		base = stripRetrySuffix(m.profileDir)
 	}
+	removed := 0
+	for _, dir := range staleRetryProfiles(base, m.profileDir, 10*time.Minute, time.Now()) {
+		if err := os.RemoveAll(dir); err == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Printf("[browser] 已清理 %d 个陈旧的重试 profile 目录（每个几十 MB，登录态已固化到正式目录）", removed)
+	}
+}
+
+// staleRetryProfiles 列出可以安全删除的重试 profile 目录（纯函数，方便单测）。
+//
+//   - base：去掉重试后缀的基准目录（如 data/browser-profile）
+//   - inUse：当前/已固化的 profile 目录，永远不删
+//   - 最近 olderThan 内还有改动的目录可能正被别的实例使用，跳过
+func staleRetryProfiles(base, inUse string, olderThan time.Duration, now time.Time) []string {
+	if base == "" {
+		return nil
+	}
+	matches, err := filepath.Glob(base + "-retry*")
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
 	for _, dir := range matches {
-		// 已固化的正式 profile 目录不能删（登录态在里面）
-		if dir == m.profileDir {
+		if dir == inUse || dir == base {
 			continue
 		}
-		_ = os.RemoveAll(dir)
+		st, serr := os.Stat(dir)
+		if serr != nil || !st.IsDir() {
+			continue
+		}
+		if now.Sub(st.ModTime()) < olderThan {
+			continue
+		}
+		out = append(out, dir)
 	}
+	return out
 }
 
 // firstNonEmpty 返回第一个非空字符串。

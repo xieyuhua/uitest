@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ============================================================================
 // 接口采集（录制 → 筛选 → 定时抓取 → 落库）
@@ -92,10 +95,54 @@ type HarvestEndpoint struct {
 	RecordsPath string         `json:"records_path,omitempty"`
 	Fields      []HarvestField `json:"fields,omitempty"`
 
-	// ---- 录制时的样本（只做预览/字段识别，不参与抓取）----
-	SampleStatus int    `json:"sample_status,omitempty"`
-	SampleBody   string `json:"sample_body,omitempty"`
-	CreatedFrom  string `json:"created_from,omitempty"` // 来源 capture id
+	// ---- 录制时的响应样本（只服务「从样本重新识别字段/分页」，不参与抓取）----
+	SampleBody  string `json:"sample_body,omitempty"`
+	CreatedFrom string `json:"created_from,omitempty"` // 来源 capture request id
+
+	// ---- 录制快照（请求侧）：建任务时从录制会话拷一份，任务里随时能回看"当初录到了什么" ----
+	// 这些都是**明文**（含 Cookie / Authorization），用于判断会话与参数是否真的生效。
+	SampleHeaders map[string]string `json:"sample_headers,omitempty"`  // 录制时的原始请求头
+	SampleReqBody string            `json:"sample_req_body,omitempty"` // 录制时的请求体（截断）
+	SamplePageURL string            `json:"sample_page_url,omitempty"` // 触发这条请求的页面
+	SampleAt      string            `json:"sample_at,omitempty"`       // 录制时间
+
+	// Sink 可选：给这一个接口单独指定落库目标（不同接口写不同文件 / 不同表）。
+	// 只填需要的字段，其余沿用任务的 sink；例如 {"table":"products"}。
+	// 留空时：任务开了 split_by_endpoint 就按接口名自动分表/分文件，否则与任务共用。
+	Sink *HarvestSink `json:"sink,omitempty"`
+}
+
+// EndpointSlug 接口名 → 可做表名 / 文件名的短标识（中文保留，其余非法字符转下划线）。
+func EndpointSlug(ep HarvestEndpoint) string {
+	if s := slugify(ep.Name); s != "" {
+		return s
+	}
+	if s := slugify(ep.ID); s != "" {
+		return s
+	}
+	if s := slugify(ep.Method + "_" + ep.URL); s != "" {
+		if len(s) > 40 {
+			s = s[:40]
+		}
+		return s
+	}
+	return "endpoint"
+}
+
+// slugify 只保留字母、数字、下划线与中文，其它字符统一替换成下划线。
+func slugify(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		case r >= 0x4e00 && r <= 0x9fa5:
+			b.WriteRune(r)
+		case r == ' ' || r == '/' || r == '.' || r == ':':
+			b.WriteRune('_')
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
 
 // HarvestPagination 分页策略。
@@ -281,13 +328,13 @@ type HarvestThrottle struct {
 
 // HarvestSink 数据落库目标。
 type HarvestSink struct {
-	// Driver sqlite | mysql | postgres | jsonl
+	// Driver sqlite | mysql | postgres | jsonl / json / xlsx
 	Driver string `json:"driver"`
 	// DSN sqlite=文件路径（留空则用 data/harvest/harvest.db）；
 	// mysql=user:pass@tcp(host:3306)/db?charset=utf8mb4；
-	// postgres=postgres://user:pass@host:5432/db?sslmode=disable；jsonl 忽略
+	// postgres=postgres://user:pass@host:5432/db?sslmode=disable；文件类忽略
 	DSN string `json:"dsn,omitempty"`
-	// Table 表名（jsonl 模式即文件名）
+	// Table 表名（文件类即文件名，不含扩展名）
 	Table string `json:"table"`
 	// Mode append 追加 | upsert 按 KeyColumn 覆盖
 	Mode string `json:"mode"`
@@ -297,18 +344,231 @@ type HarvestSink struct {
 	BatchSize int `json:"batch_size,omitempty"`
 }
 
-// HarvestSession 会话复用：让定时抓取带着"录这条接口时那个登录态"。
+// Merge 用 other 覆盖自己已填的字段（空值不覆盖），返回新副本。
+func (s HarvestSink) Merge(other HarvestSink) HarvestSink {
+	out := s
+	if other.Driver != "" {
+		out.Driver = other.Driver
+	}
+	if other.DSN != "" {
+		out.DSN = other.DSN
+	}
+	if other.Table != "" {
+		out.Table = other.Table
+	}
+	if other.Mode != "" {
+		out.Mode = other.Mode
+	}
+	if other.KeyColumn != "" {
+		out.KeyColumn = other.KeyColumn
+	}
+	if other.BatchSize > 0 {
+		out.BatchSize = other.BatchSize
+	}
+	return out
+}
+
+// SinkProfile 一套可复用的落库配置（数据库连接 + 表 / 文件）。
+//
+// 任务与接口都可以引用它；"数据写入"页负责它的新建 / 测试 / 保存 / 删除。
+type SinkProfile struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Sink 内嵌，JSON 里直接展开成 driver / dsn / table / mode / key_column / batch_size
+	HarvestSink
+	// Note 备注（给团队看的一句话说明）
+	Note string `json:"note,omitempty"`
+	// CreatedAt / UpdatedAt 维护时间
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// HarvestPrelogin 采集前先跑一段 UI 自动化录制（通常是「登录」），把内置浏览器会话刷新好再抓数据。
+//
+//	token / Cookie 会随登录状态变化时这是最稳的办法：真的在浏览器里点一遍登录，
+//	之后再导出 Cookie / token，抓取就能带上最新的登录态。
+type HarvestPrelogin struct {
+	Enabled bool `json:"enabled"`
+	// RecordingID UI 自动化里录好的「登录」流程
+	RecordingID string `json:"recording_id,omitempty"`
+	// RecordingName 只用于展示
+	RecordingName string `json:"recording_name,omitempty"`
+	// Mode always 每次运行前都跑 | on-fail 只在会话失效（401/403）时补跑
+	Mode string `json:"mode,omitempty"`
+	// TimeoutSeconds 跑登录流程的超时（默认 180）
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// ContinueOnError 登录流程失败时是否继续抓（默认 false：本次运行直接失败）
+	ContinueOnError bool `json:"continue_on_error,omitempty"`
+	// Vars 登录流程要用的变量（key=value）。
+	// 录制时密码框会被脱敏成 {{password}}，必须在这里填上真实值才能在回放时真正登录；
+	// 值支持 {{env:XXX}}，可以把账号密码放环境变量里。
+	Vars map[string]string `json:"vars,omitempty"`
+}
+
+// Effective 填好默认值。
+func (p HarvestPrelogin) Effective() HarvestPrelogin {
+	out := p
+	if strings.TrimSpace(out.Mode) == "" {
+		out.Mode = "always"
+	}
+	if out.TimeoutSeconds <= 0 {
+		out.TimeoutSeconds = 180
+	}
+	if out.TimeoutSeconds > 3600 {
+		out.TimeoutSeconds = 3600
+	}
+	return out
+}
+
+// Active 是否真的需要在运行前跑一遍登录流程。
+func (p HarvestPrelogin) Active() bool {
+	return p.Enabled && strings.TrimSpace(p.RecordingID) != ""
+}
+
+// ModeText 人可读的触发时机。
+func (p HarvestPrelogin) ModeText() string {
+	if p.Effective().Mode == "on-fail" {
+		return "会话失效时才跑"
+	}
+	return "每次运行前都跑"
+}
+
+// HarvestSession 会话：统一用内置浏览器的登录态。
+//
+// 现在的模型只有一种来源——「前置登录（UI 自动化）」把浏览器登进去，
+// 之后抓取用的 Cookie 和请求头全部从浏览器里取（只有 URL / 请求体按接口配置）。
+// Mode / Cookie / UserAgent / Referer 字段仅为兼容老任务保留，运行时一律按浏览器会话处理。
 type HarvestSession struct {
-	// Mode none 无会话 | cookie 用下面粘贴的 Cookie | browser 运行时从内置浏览器导出
-	Mode string `json:"mode"`
-	// Cookie 形如 "a=1; b=2"
-	Cookie string `json:"cookie,omitempty"`
-	// UserAgent 留空则用录制时的 UA（不轮换、不伪造）
+	Mode      string `json:"mode,omitempty"`
+	Cookie    string `json:"cookie,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
-	// Referer 留空则用录制时的页面地址
-	Referer string `json:"referer,omitempty"`
-	// Host 仅 browser 模式：从这个站点导出 Cookie（如 https://example.com）
+	Referer   string `json:"referer,omitempty"`
+	// Host 从这个站点导出 Cookie/请求头（如 https://example.com）；留空用起始页/第一个接口的 origin
 	Host string `json:"host,omitempty"`
+	// HeaderMode 浏览器实时请求头怎么覆盖接口里录制下来的头：
+	//   all（默认）浏览器抓到什么就用什么（除内容相关的请求头外全部共享）
+	//   auth       只覆盖鉴权类（Authorization / *token* / *auth* / x-*）
+	//   off        不覆盖，只用接口配置里的值
+	HeaderMode string `json:"header_mode,omitempty"`
+	// Token 兼容保留（界面上已不提供配置入口）
+	Token *HarvestToken `json:"token,omitempty"`
+}
+
+// EffectiveHeaderMode 浏览器请求头覆盖策略（默认 all：除请求参数外与浏览器共享）。
+func (s HarvestSession) EffectiveHeaderMode() string {
+	switch strings.ToLower(strings.TrimSpace(s.HeaderMode)) {
+	case "off", "none":
+		return "off"
+	case "auth":
+		return "auth"
+	default:
+		return "all"
+	}
+}
+
+// HarvestToken token 型站点的凭证来源与注入方式（界面上已不再提供配置入口，
+// 仅保留后端兼容：老任务里存过的 token 配置仍然生效）。
+type HarvestToken struct {
+	// Source browser 从内置浏览器存储读 | manual 手填 | login 调登录接口换
+	Source string `json:"source"`
+	// Storage browser 模式下从哪读：localStorage（默认）| sessionStorage
+	Storage string `json:"storage,omitempty"`
+	// Key browser 模式下的键名，如 token / access_token / Authorization
+	Key string `json:"key,omitempty"`
+	// Value manual 模式的 token；支持 {{env:NAME}}，便于把密钥放在环境变量里
+	Value string `json:"value,omitempty"`
+	// Header 注入到哪个请求头，默认 Authorization
+	Header string `json:"header,omitempty"`
+	// Prefix 前缀，默认 "Bearer "；填 "-" 表示不加前缀
+	Prefix string `json:"prefix,omitempty"`
+	// CacheSeconds token 缓存多久（秒）
+	CacheSeconds int `json:"cache_seconds,omitempty"`
+	// Login source=login：直接调登录接口换 token（不用开浏览器）
+	Login *HarvestLogin `json:"login,omitempty"`
+}
+
+// HarvestLogin 登录接口：POST 一份账号密码，从响应 JSON 里取 token。
+type HarvestLogin struct {
+	Method    string            `json:"method,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Body      string            `json:"body,omitempty"`
+	TokenPath string            `json:"token_path,omitempty"`
+	// WithCookies 登录返回的 Set-Cookie 也带进采集请求（默认 true）
+	WithCookies *bool `json:"with_cookies,omitempty"`
+}
+
+// Effective 登录接口的默认值（Method=POST，TokenPath=data）。
+func (l HarvestLogin) Effective() HarvestLogin {
+	out := l
+	if strings.TrimSpace(out.Method) == "" {
+		out.Method = "POST"
+	}
+	if strings.TrimSpace(out.TokenPath) == "" {
+		out.TokenPath = "data"
+	}
+	return out
+}
+
+// UseCookies 登录响应的 Cookie 是否带进采集请求。
+func (l HarvestLogin) UseCookies() bool {
+	return l.WithCookies == nil || *l.WithCookies
+}
+
+// Effective 填好默认值（来源为空时按 Value/Key/Login 推断）。
+func (t HarvestToken) Effective() HarvestToken {
+	out := t
+	if out.Source == "" {
+		switch {
+		case out.Login != nil && strings.TrimSpace(out.Login.URL) != "":
+			out.Source = "login"
+		case strings.TrimSpace(out.Value) != "":
+			out.Source = "manual"
+		case strings.TrimSpace(out.Key) != "":
+			out.Source = "browser"
+		default:
+			out.Source = "none"
+		}
+	}
+	if out.Storage == "" {
+		out.Storage = "localStorage"
+	}
+	if out.Header == "" {
+		out.Header = "Authorization"
+	}
+	if out.Prefix == "" {
+		out.Prefix = "Bearer "
+	}
+	if out.Prefix == "-" {
+		out.Prefix = ""
+	}
+	if out.Login != nil {
+		lg := out.Login.Effective()
+		out.Login = &lg
+	}
+	return out
+}
+
+// Enabled 是否需要注入 token。
+func (t HarvestToken) Enabled() bool {
+	return t.Effective().Source != "none"
+}
+
+// HarvestCommon 任务级「公共参数」：所有接口共用一份。
+//
+// 优先级（后者覆盖前者）：
+//
+//	公共参数 → 接口自己的 URL / 请求头 / 请求体 → 前置登录后的浏览器请求头 → 登录后脚本
+type HarvestCommon struct {
+	// Params 公共参数：GET/DELETE 进 URL query，POST/PUT/PATCH 进 JSON 请求体
+	Params map[string]string `json:"params,omitempty"`
+	// Headers 公共请求头（浏览器共享的同名头会覆盖它）
+	Headers map[string]string `json:"headers,omitempty"`
+	// Script 登录成功后在内置浏览器里执行的脚本，返回值是 JSON：
+	//   {"params":{"token":"…"},"headers":{"X-Token":"…"}}
+	//   {"token":"…"}  → 自动写成 Authorization: Bearer <token>
+	// 可以读 localStorage / cookie / 页面变量，用来把登录结果灌进公共参数。
+	Script string `json:"script,omitempty"`
 }
 
 // HarvestTask 一个定时采集任务。
@@ -323,7 +583,17 @@ type HarvestTask struct {
 	Schedule  HarvestSchedule   `json:"schedule"`
 	Throttle  HarvestThrottle   `json:"throttle"`
 	Sink      HarvestSink       `json:"sink"`
-	Session   HarvestSession    `json:"session"`
+	// SplitByEndpoint true = 每个接口单独落库：表名/文件名 = sink.table + "_" + 接口名
+	SplitByEndpoint bool `json:"split_by_endpoint,omitempty"`
+	// SinkProfileID 从哪套「数据写入」配置复制来的（仅做溯源，值已展开进 Sink）
+	SinkProfileID string         `json:"sink_profile_id,omitempty"`
+	Session       HarvestSession `json:"session"`
+	// Prelogin 可选：运行前先跑一段 UI 自动化（登录），刷新内置浏览器会话后再抓
+	Prelogin *HarvestPrelogin `json:"prelogin,omitempty"`
+	// Notify 可选：跑完把成功 / 失败结果推到企业微信群机器人
+	Notify *HarvestNotify `json:"notify,omitempty"`
+	// Common 公共参数：所有接口共用（前置登录的浏览器请求头、登录后脚本会覆盖同名项）
+	Common *HarvestCommon `json:"common,omitempty"`
 
 	// Status active | paused | error（error=连续失败被自动暂停）
 	Status string `json:"status"`
@@ -354,18 +624,77 @@ func (t HarvestTask) Clone() HarvestTask {
 			}
 		}
 		ne.Fields = append([]HarvestField(nil), e.Fields...)
+		if e.SampleHeaders != nil {
+			ne.SampleHeaders = make(map[string]string, len(e.SampleHeaders))
+			for k, v := range e.SampleHeaders {
+				ne.SampleHeaders[k] = v
+			}
+		}
+		if e.Sink != nil {
+			s := *e.Sink
+			ne.Sink = &s
+		}
 		c.Endpoints[i] = ne
 	}
 	c.Schedule.Times = append([]string(nil), t.Schedule.Times...)
 	c.Schedule.Weekdays = append([]int(nil), t.Schedule.Weekdays...)
+	if t.Session.Token != nil {
+		tk := *t.Session.Token
+		if tk.Login != nil {
+			lg := *tk.Login
+			if lg.Headers != nil {
+				lg.Headers = make(map[string]string, len(tk.Login.Headers))
+				for k, v := range tk.Login.Headers {
+					lg.Headers[k] = v
+				}
+			}
+			tk.Login = &lg
+		}
+		c.Session.Token = &tk
+	}
+	if t.Prelogin != nil {
+		pl := *t.Prelogin
+		if t.Prelogin.Vars != nil {
+			pl.Vars = make(map[string]string, len(t.Prelogin.Vars))
+			for k, v := range t.Prelogin.Vars {
+				pl.Vars[k] = v
+			}
+		}
+		c.Prelogin = &pl
+	}
+	if t.Notify != nil {
+		nt := *t.Notify
+		if t.Notify.Mentioned != nil {
+			nt.Mentioned = append([]string(nil), t.Notify.Mentioned...)
+		}
+		c.Notify = &nt
+	}
+	if t.Common != nil {
+		cm := *t.Common
+		if t.Common.Params != nil {
+			cm.Params = make(map[string]string, len(t.Common.Params))
+			for k, v := range t.Common.Params {
+				cm.Params[k] = v
+			}
+		}
+		if t.Common.Headers != nil {
+			cm.Headers = make(map[string]string, len(t.Common.Headers))
+			for k, v := range t.Common.Headers {
+				cm.Headers[k] = v
+			}
+		}
+		c.Common = &cm
+	}
 	return c
 }
 
-// Summary 列表用副本（去掉样本响应体，列表不背大字段）。
+// Summary 列表用副本（去掉录制快照里的响应体/请求体，列表不背大字段）。
 func (t HarvestTask) Summary() HarvestTask {
 	c := t.Clone()
 	for i := range c.Endpoints {
 		c.Endpoints[i].SampleBody = ""
+		c.Endpoints[i].SampleReqBody = ""
+		c.Endpoints[i].SampleHeaders = nil
 	}
 	return c
 }
@@ -381,6 +710,35 @@ func (t HarvestTask) EndpointCount() int {
 	return n
 }
 
+// EndpointSink 计算某个接口实际使用的落库目标。
+//
+// 优先级：接口自己的 sink > 任务 sink；接口没写表名且任务开了 split_by_endpoint 时，
+// 表名 = 任务表名 + "_" + 接口名（"不同接口写不同文件 / 不同表"就是这么来的）。
+func (t HarvestTask) EndpointSink(ep HarvestEndpoint) HarvestSink {
+	out := t.Sink
+	explicitTable := ""
+	if ep.Sink != nil {
+		out = out.Merge(*ep.Sink)
+		explicitTable = strings.TrimSpace(ep.Sink.Table)
+	}
+	if out.Table == "" {
+		out.Table = "harvest_records"
+	}
+	if explicitTable == "" && t.SplitByEndpoint {
+		out.Table = out.Table + "_" + EndpointSlug(ep)
+	}
+	if out.Driver == "" {
+		out.Driver = "sqlite"
+	}
+	if out.BatchSize <= 0 {
+		out.BatchSize = 200
+	}
+	if !strings.EqualFold(out.Mode, "upsert") {
+		out.Mode = "append"
+	}
+	return out
+}
+
 // HarvestEndpointResult 一次运行里单个接口的结果。
 type HarvestEndpointResult struct {
 	EndpointID string `json:"endpoint_id"`
@@ -391,6 +749,8 @@ type HarvestEndpointResult struct {
 	Pages      int    `json:"pages"`
 	Fetched    int    `json:"fetched"` // 解析出的记录数
 	Written    int    `json:"written"` // 写库成功的行数
+	// Target 本次写入目标（表名 / 文件路径），便于确认"这个接口写到哪儿了"
+	Target string `json:"target,omitempty"`
 	// Duplicates 跨页去重时被跳过的重复记录数（接口分页不干净时会 > 0）
 	Duplicates int    `json:"duplicates,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
@@ -403,7 +763,36 @@ type HarvestEndpointResult struct {
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
-// HarvestRun 一次采集执行。
+// HarvestNotify 任务跑完推送结果（企业微信群机器人）。
+//
+// Webhook 形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<群机器人 key>，
+// 用的是"群机器人"接口（不需要 access_token），失败只会记进运行日志，不影响采集结果。
+type HarvestNotify struct {
+	Enabled bool `json:"enabled"`
+	// Webhook 群机器人地址（含 key）
+	Webhook string `json:"webhook,omitempty"`
+	// OnSuccess 成功也推（不填默认推）
+	OnSuccess *bool `json:"on_success,omitempty"`
+	// OnFailure 失败也推（不填默认推）
+	OnFailure *bool `json:"on_failure,omitempty"`
+	// Mentioned text 消息里 @ 的人（userid / 手机号；填 all 表示 @所有人）
+	Mentioned []string `json:"mentioned,omitempty"`
+	// BaseURL 详情链接前缀，如 http://127.0.0.1:8490（留空则消息里不带链接）
+	BaseURL string `json:"base_url,omitempty"`
+}
+
+// Active 是否真的会推送。
+func (n HarvestNotify) Active() bool {
+	return n.Enabled && strings.TrimSpace(n.Webhook) != ""
+}
+
+// WantSuccess 成功时是否推送。
+func (n HarvestNotify) WantSuccess() bool { return n.OnSuccess == nil || *n.OnSuccess }
+
+// WantFailure 失败时是否推送。
+func (n HarvestNotify) WantFailure() bool { return n.OnFailure == nil || *n.OnFailure }
+
+// HarvestRun 一次采集运行记录。
 type HarvestRun struct {
 	ID       string `json:"id"`
 	TaskID   string `json:"task_id"`
@@ -426,10 +815,11 @@ type HarvestRun struct {
 	Error string `json:"error,omitempty"`
 }
 
-// Summary 列表用副本。
+// Summary 列表用副本（去掉日志，列表不背大字段）。
 func (r HarvestRun) Summary() HarvestRun {
-	r.Logs = nil
-	return r
+	out := r
+	out.Logs = nil
+	return out
 }
 
 // Clone 深拷贝。
@@ -519,9 +909,8 @@ func (t *HarvestTask) Normalize() {
 	if t.Sink.BatchSize <= 0 {
 		t.Sink.BatchSize = 200
 	}
-	if t.Session.Mode == "" {
-		t.Session.Mode = "none"
-	}
+	// 会话统一走浏览器：老任务里的 none / cookie 一律当作 browser 处理
+	t.Session.Mode = "browser"
 	if t.Status == "" {
 		t.Status = "active"
 	}

@@ -31,6 +31,10 @@ type NetCaptureOptions struct {
 	MaxEntries int
 	// PageURL 起始页面地址（记录在每条请求上，作为默认 Referer）。
 	PageURL string
+	// AllHeaders true = 记录完整请求头。
+	// 录制接口时保持 false：只留 Content-Type（登录态头由浏览器会话提供，存下来只会变成过期死值）；
+	// 采集运行期"嗅探浏览器真实请求头"时才需要 true。
+	AllHeaders bool
 }
 
 // NetCapture 一次接口录制会话。
@@ -51,6 +55,8 @@ type NetCapture struct {
 	stopOnce sync.Once
 	started  time.Time
 	dropped  int
+	// skipped 按类型统计"没录"的请求数（诊断用：能看出 Document 事件到底来没来）
+	skipped map[string]int
 	// done 关闭后，所有事件协程退出（停止录制时释放 goroutine）
 	done chan struct{}
 }
@@ -84,6 +90,7 @@ func (p *Page) StartNetCapture(opts NetCaptureOptions) (*NetCapture, error) {
 		page:     p,
 		opts:     opts,
 		items:    map[string]*model.CapturedRequest{},
+		skipped:  map[string]int{},
 		bodyQ:    make(chan string, 512),
 		bodyStop: make(chan struct{}),
 		workerOK: make(chan struct{}),
@@ -137,6 +144,7 @@ func (c *NetCapture) sub(method string, fn func(json.RawMessage)) {
 func (c *NetCapture) onRequest(raw json.RawMessage) {
 	var p struct {
 		RequestID   string  `json:"requestId"`
+		LoaderID    string  `json:"loaderId"`
 		Type        string  `json:"type"`
 		Timestamp   float64 `json:"timestamp"`
 		DocumentURL string  `json:"documentURL"`
@@ -151,20 +159,26 @@ func (c *NetCapture) onRequest(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &p); err != nil || p.RequestID == "" {
 		return
 	}
-	if !c.wantedType(p.Type) {
+	// 主框架导航（requestId == loaderId）一定是页面文档；CDP 有些版本不给 type，这里补上
+	typ := strings.TrimSpace(p.Type)
+	if p.LoaderID != "" && p.RequestID == p.LoaderID {
+		typ = "Document"
+	}
+	if !c.wantedType(typ) {
+		c.countSkipped(typ)
 		return
 	}
 	u, err := url.Parse(p.Request.URL)
 	if err != nil || u.Scheme == "" {
+		c.countSkipped(typ)
 		return
 	}
-	// data: / blob: 这类没有意义的请求丢掉
+	// data: / blob: / about: 这类没有意义的请求一律丢掉（包括 about:blank 的空文档）
 	switch u.Scheme {
 	case "http", "https":
 	default:
-		if p.Type != "Document" {
-			return
-		}
+		c.countSkipped(typ)
+		return
 	}
 
 	c.mu.Lock()
@@ -185,7 +199,7 @@ func (c *NetCapture) onRequest(raw json.RawMessage) {
 			ID:      p.RequestID,
 			Index:   c.seq,
 			At:      time.Now(),
-			Type:    p.Type,
+			Type:    typ,
 			PageURL: firstNonEmptyStr(p.DocumentURL, c.opts.PageURL),
 		}
 		c.items[p.RequestID] = item
@@ -196,10 +210,16 @@ func (c *NetCapture) onRequest(raw json.RawMessage) {
 	item.Host = u.Host
 	item.Path = u.Path
 	item.Query = u.RawQuery
-	item.Kind = kindOf(p.Type)
-	item.Type = p.Type
+	item.Kind = kindOf(typ)
+	item.Type = typ
+	// 请求头：录制接口时只留 Content-Type（登录态头由「前置登录 + 浏览器会话」统一提供，
+	// 存下来只会变成过期的死值）；运行期嗅探真实会话头时才整套记录。
 	if c.opts.CaptureBodies && len(p.Request.Headers) > 0 {
-		item.ReqHeaders = stringifyHeaders(p.Request.Headers)
+		if c.opts.AllHeaders {
+			item.ReqHeaders = stringifyHeaders(p.Request.Headers)
+		} else if ct := headerValue(p.Request.Headers, "content-type"); ct != "" {
+			item.ReqHeaders = map[string]string{"Content-Type": ct}
+		}
 	}
 	if p.Request.HasPostData && p.Request.PostData != "" {
 		item.PostData = truncate(p.Request.PostData, 64<<10)
@@ -362,6 +382,30 @@ func (c *NetCapture) Count() int {
 	return len(c.order)
 }
 
+// countSkipped 记一笔"因为类型不在录制范围里而没录"的请求（诊断用）。
+func (c *NetCapture) countSkipped(typ string) {
+	if strings.TrimSpace(typ) == "" {
+		typ = "(无类型)"
+	}
+	c.mu.Lock()
+	if c.skipped == nil {
+		c.skipped = map[string]int{}
+	}
+	c.skipped[typ]++
+	c.mu.Unlock()
+}
+
+// SkippedTypes 没录到的请求按类型统计（页面文档没出来时用它定位）。
+func (c *NetCapture) SkippedTypes() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int, len(c.skipped))
+	for k, v := range c.skipped {
+		out[k] = v
+	}
+	return out
+}
+
 // Stop 停止录制并返回最终结果（幂等）。
 func (c *NetCapture) Stop() []model.CapturedRequest {
 	c.stopOnce.Do(func() {
@@ -392,7 +436,7 @@ type Cookie struct {
 	Domain   string  `json:"domain"`
 	Path     string  `json:"path"`
 	Expires  float64 `json:"expires"`
-	HTTPOnly bool    `json:"http_only"`
+	HTTPOnly bool    `json:"httpOnly"`
 	Secure   bool    `json:"secure"`
 }
 
@@ -413,6 +457,20 @@ func (p *Page) Cookies(ctx context.Context, urls []string) ([]Cookie, error) {
 	return res.Cookies, nil
 }
 
+// AllCookies 导出整个浏览器 profile 里的所有 Cookie（Storage.getCookies）。
+//
+// 比 Cookies(urls) 更"笨但更全"：登录可能发生在别的子域、或页面没加载完就导出，
+// 这时按 URL 取可能拿不到，按全量取再自己按域名过滤更稳。前置登录后就用它兜底。
+func (p *Page) AllCookies(ctx context.Context) ([]Cookie, error) {
+	var res struct {
+		Cookies []Cookie `json:"cookies"`
+	}
+	if err := p.call(ctx, "Storage.getCookies", nil, &res); err != nil {
+		return nil, err
+	}
+	return res.Cookies, nil
+}
+
 /* -------------------------------------------------------------------- 辅助 */
 
 func kindOf(cdpType string) string {
@@ -428,6 +486,7 @@ func kindOf(cdpType string) string {
 	}
 }
 
+// stringifyHeaders 把 CDP 的原始头（值可能是字符串/数字/布尔/嵌套）转成字符串表。
 func stringifyHeaders(in map[string]any) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
@@ -454,6 +513,31 @@ func stringifyHeaders(in map[string]any) map[string]string {
 func jsonNumber(f float64) string {
 	b, _ := json.Marshal(f)
 	return string(b)
+}
+
+// headerValue 从 CDP 的请求头里取某个头（大小写不敏感），非字符串值转成字符串。
+func headerValue(in map[string]any, name string) string {
+	for k, v := range in {
+		if !strings.EqualFold(k, name) {
+			continue
+		}
+		switch tv := v.(type) {
+		case string:
+			return tv
+		case float64:
+			return jsonNumber(tv)
+		case bool:
+			if tv {
+				return "true"
+			}
+			return "false"
+		default:
+			if b, err := json.Marshal(tv); err == nil {
+				return string(b)
+			}
+		}
+	}
+	return ""
 }
 
 func truncate(s string, max int) string {

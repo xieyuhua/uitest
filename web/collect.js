@@ -5,7 +5,7 @@
  *       → 定时抓取 → 写入数据库或文件（SQLite / MySQL / PostgreSQL / Excel / JSON / JSONL）
  *
  * 说明：
- *   - 依赖 app.js 暴露的 window.UITest（api / toast / esc / 弹窗 / 分页等），
+ *   - 依赖 app.js 暴露的 window.UITest（api / toast / esc / 弹窗 / 格式化等），
  *     不再重复实现一套工具函数；
  *   - 风格与其余页面一致：原生 JS + 事件委托，无构建步骤。
  * ========================================================================== */
@@ -36,9 +36,11 @@
   }
 
   function headHtml(title, sub, actions) {
-    return '<div class="page-head"><h1>' + esc(title) + '</h1>' +
-      (sub ? '<div class="sub">' + sub + '</div>' : '') +
-      (actions ? '<div class="head-actions" style="margin-top:10px">' + actions + '</div>' : '') +
+    return '<div class="page-head">' +
+      '<div><h1>' + esc(title) + '</h1>' +
+      (sub ? '<p class="sub">' + sub + '</p>' : '') +
+      '</div>' +
+      (actions ? '<div class="head-actions">' + actions + '</div>' : '') +
       '</div>';
   }
 
@@ -135,8 +137,52 @@
       esc(value === null || value === undefined ? '' : value) + '</textarea>';
   }
 
-  function selectHtml(id, options, value) {
-    var html = '<select class="input" id="' + id + '">';
+  /* --- 键值文本互转（请求头 "Name: Value" / 变量 "k=v" 共用一套） ---------------- */
+
+  /** 对象 → "key<sep>value" 多行文本 */
+  function kvText(obj, sep) {
+    if (!obj) return '';
+    return Object.keys(obj).map(function (k) { return k + sep + obj[k]; }).join('\n');
+  }
+
+  /** "key<sep>value" 多行文本 → 对象（空行和 # 注释跳过，按第一个分隔符切） */
+  function parseKV(text, sep) {
+    var out = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var s = line.trim();
+      if (!s || s.charAt(0) === '#') return;
+      var i = s.indexOf(sep);
+      if (i <= 0) return;
+      var k = s.slice(0, i).trim();
+      if (k) out[k] = s.slice(i + sep.length).trim();
+    });
+    return out;
+  }
+
+  function varsToText(v) { return kvText(v, '='); }
+  function headersToText(h) { return kvText(h, ': '); }
+  function textToHeaders(text) { return parseKV(text, ':'); }
+
+  /** 录制快照里的请求头：去掉由「会话」负责的 Cookie / UA / Referer / Host 等，别把过期登录态钉死 */
+  function sessionlessHeaders(h) {
+    var out = {};
+    Object.keys(h || {}).forEach(function (k) {
+      var lk = k.toLowerCase().trim();
+      if (lk === 'cookie' || lk === 'user-agent' || lk === 'referer' || lk === 'host' ||
+        lk === 'content-length' || lk === 'connection' || lk.charAt(0) === ':') return;
+      if (lk.indexOf('sec-') === 0) return;
+      out[k] = h[k];
+    });
+    return out;
+  }
+
+  /** 去掉后端预览用的截断标记「…（共 N 字节，已截断）」 */
+  function stripTruncMark(s) {
+    return String(s || '').replace(/…（共 \d+ 字节，已截断）\s*$/, '').trim();
+  }
+
+  function selectHtml(id, options, value, attrs) {
+    var html = '<select class="input" id="' + id + '" ' + (attrs || '') + '>';
     options.forEach(function (o) {
       var v = Array.isArray(o) ? o[0] : o.value;
       var label = Array.isArray(o) ? o[1] : o.label;
@@ -165,20 +211,15 @@
       ['jsonl', 'JSON Lines（.jsonl）']];
   }
 
-  function sessionOptions() {
-    if (Opt.data && Opt.data.session_modes) {
-      return Opt.data.session_modes.map(function (d) { return [d.value, d.label]; });
-    }
-    return [['browser', '复用内置浏览器登录态'], ['cookie', '手工 Cookie'], ['none', '无会话']];
-  }
-
-  // 定时 / 限速 / 落库 / 会话 四段配置（建任务弹窗与任务详情共用）
+  // 定时 / 限速 / 落库 / 登录态 四段配置（建任务弹窗与任务详情共用）
   function configFormHtml(pfx, cfg) {
     cfg = cfg || {};
     var sch = cfg.schedule || { mode: 'interval', every_seconds: 300, jitter_percent: 20 };
     var th = cfg.throttle || {};
     var sink = cfg.sink || { driver: 'sqlite', table: 'harvest_records', mode: 'append', batch_size: 200 };
     var sess = cfg.session || { mode: 'browser' };
+    var pl = cfg.prelogin || {};
+    var cm = cfg.common || {};
     return '' +
       '<div class="ds-block"><div class="ds-block-title">定时计划</div><div class="form-grid">' +
       fld('触发方式', selectHtml(pfx + '_mode', [['interval', '固定间隔'], ['daily', '每天定时'], ['manual', '仅手动']], sch.mode)) +
@@ -197,22 +238,106 @@
       fld('分页默认上限', numHtml(pfx + '_maxpages', th.max_pages_cap || 50, 'min="1" max="2000"'),
         '只在接口没填「最多页数」时生效；接口填了就以接口为准') +
       '</div></div>' +
-      '<div class="ds-block"><div class="ds-block-title">写入数据库</div><div class="form-grid">' +
+      '<div class="ds-block"><div class="ds-block-title">写入数据库</div>' +
+      '<div class="field-hint" style="margin:0 0 10px">连接串（DSN）在「数据写入」里统一配置，这里只选目标类型和表名。</div>' +
+      // DSN 不再暴露给用户编辑，但要跟着任务走（引用「数据写入」配置时由它带过来）
+      '<input type="hidden" id="' + pfx + '_dsn" value="' + esc(sink.dsn || '') + '">' +
+      '<div class="form-grid">' +
       fld('数据库类型', selectHtml(pfx + '_driver', driverOptions(), sink.driver)) +
-      fld('连接串 DSN', inputHtml(pfx + '_dsn', sink.dsn || '', 'placeholder="SQLite 可留空"')) +
       fld('表名 / 文件名', inputHtml(pfx + '_table', sink.table || 'harvest_records')) +
       fld('写入模式', selectHtml(pfx + '_sinkmode', [['append', '追加'], ['upsert', '按主键覆盖']], sink.mode || 'append')) +
       fld('去重键列（upsert 用）', inputHtml(pfx + '_key', sink.key_column || '', 'placeholder="如 id"')) +
       fld('批量提交行数', numHtml(pfx + '_batch', sink.batch_size || 200)) +
       '</div></div>' +
-      '<div class="ds-block"><div class="ds-block-title">会话（登录态）</div><div class="form-grid">' +
-      fld('来源', selectHtml(pfx + '_smode', sessionOptions(), sess.mode || 'browser')) +
-      fld('站点（browser 用）', inputHtml(pfx + '_host', sess.host || '', 'placeholder="https://example.com"')) +
-      fld('User-Agent', inputHtml(pfx + '_ua', sess.user_agent || '', 'placeholder="留空 = 录制时的 UA"')) +
-      fld('Referer', inputHtml(pfx + '_referer', sess.referer || '', 'placeholder="留空 = 录制页面地址"')) +
+      '<div class="ds-block"><div class="ds-block-title">登录态（浏览器会话）</div>' +
+      '<div class="field-hint" style="margin:0 0 10px">抓取时的 <b>Cookie 和请求头全部来自内置浏览器</b>：' +
+      '先用下面的「前置登录」把浏览器登好，之后就只有 URL / 请求体这些请求参数按接口配置。</div>' +
+      '<div class="form-grid">' +
+      fld('站点（留空 = 起始页 / 第一个接口）', inputHtml(pfx + '_host', sess.host || '', 'placeholder="https://example.com"'),
+        '从哪个站点导出 Cookie 与请求头；留空则自动用任务起始页或第一个接口的域名') +
+      fld('浏览器请求头', selectHtml(pfx + '_hmode',
+        [['all', '全部共享（默认，除请求参数外都用浏览器的）'], ['auth', '只共享鉴权头'], ['off', '不共享（只用录制值）']],
+        sess.header_mode || 'all'),
+        '录制时的 Authorization 早就过期了：默认连 User-Agent / X-* 一起换成浏览器的实时值') +
       '</div>' +
-      fld('Cookie（cookie 模式，形如 a=1; b=2）', textareaHtml(pfx + '_cookie', sess.cookie || '', 2)) +
+      '</div>' +
+      // 公共参数：所有接口共用，登录后的浏览器头 / 脚本会覆盖同名项
+      '<div class="ds-block"><div class="ds-block-title"><span>公共参数</span>' +
+      '<span class="muted">所有接口共用；URL / 请求体里的同名参数以接口自己为准</span></div>' +
+      '<div class="form-grid">' +
+      fld('公共查询参数 / 请求体字段（一行一个 key=value）',
+        textareaHtml(pfx + '_cmparams', kvText(cm.params, '='), 4, 'placeholder=\'tenant_id=1001\ntoken={{env:API_TOKEN}}\''),
+        'GET/DELETE：并进 URL 查询串；POST/PUT/PATCH：并进 JSON 请求体（接口自己已有同名参数时不覆盖）') +
+      fld('公共请求头（一行一个 Name: Value）',
+        textareaHtml(pfx + '_cmheaders', headersToText(cm.headers), 4, 'placeholder="X-Tenant: demo"'),
+        '前置登录后浏览器里真实在用的同名头会盖掉这里的值；Authorization / Cookie 一般不用写') +
+      '</div>' +
+      fld('登录成功后执行的脚本（可选，返回 JSON）',
+        textareaHtml(pfx + '_cmscript', cm.script || '', 4,
+          'placeholder=\'return JSON.stringify({params:{token: localStorage.getItem("token_merchant")}})\''),
+        '在登录后的内置浏览器页面里执行，可读 localStorage / cookie；返回 {"params":{…},"headers":{…}}，' +
+        '返回 {"token":"…"} 会自动写成 Authorization: Bearer &lt;token&gt;') +
+      '</div>' +
+      '<div class="ds-block"><div class="ds-block-title"><span>前置登录（UI 自动化）</span>' +
+      '<span class="muted">唯一的登录方式：运行前在浏览器里真点一遍，登录态直接共享给抓取</span></div>' +
+      '<label class="check-line"><input type="checkbox" id="' + pfx + '_plon"' + (pl.enabled ? ' checked' : '') +
+      '> 运行前先在浏览器里登录（Cookie / 请求头随登录状态变化就靠它）</label>' +
+      '<div class="field-hint" style="margin:2px 0 8px">登录跑完立刻重新导出会话：' +
+      'Cookie、User-Agent、Authorization 等一律用浏览器里的最新值，只有 URL / 请求体按接口配置。</div>' +
+      fld('登录用变量（一行一个 key=value，支持 {{env:XXX}}）',
+        textareaHtml(pfx + '_plvars', varsToText(pl.vars), 3, 'placeholder=\'password={{env:SITE_PASS}}\''),
+        '录制器会把密码框脱敏成 {{password}}：这里必须填 password=真实密码，回放时才真的能登录（值支持 {{env:XXX}}）') +
+      '<div class="form-grid">' +
+      fld('登录流程录制', '<select class="input" id="' + pfx + '_plrec" data-rec>' + recOptions(pl.recording_id) + '</select>',
+        '在「UI 自动化」里录一段登录：打开登录页 → 输账号密码 → 点登录；运行时真的在浏览器里走一遍') +
+      fld('触发时机', selectHtml(pfx + '_plmode', [['always', '每次运行前都跑'], ['on-fail', '只在会话失效（401/403）时跑']], pl.mode || 'always')) +
+      fld('超时（秒）', numHtml(pfx + '_pltimeout', pl.timeout_seconds || 180, 'min="30" max="3600"')) +
+      '</div>' +
+      '<label class="check-line"><input type="checkbox" id="' + pfx + '_plcontinue"' + (pl.continue_on_error ? ' checked' : '') +
+      '> 登录失败也继续抓（默认：本次运行直接失败，不放行空数据）</label>' +
+      '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+      (pfx === 'tk' ? '<button class="btn btn--sm" data-act="run-prelogin">现在跑一次</button>' : '') +
+      '<span class="muted" id="pl_result"></span>' +
+      '</div>' +
       '</div>';
+  }
+
+  /* --- 录制列表（前置登录下拉用；只拉一次） --------------------------------- */
+
+  var REC_CACHE = null;
+
+  function recOptions(sel) {
+    var opts = '<option value="">（选择登录流程录制）</option>';
+    var found = false;
+    (REC_CACHE || []).forEach(function (r) {
+      if (r.id === sel) found = true;
+      opts += '<option value="' + esc(r.id) + '"' + (r.id === sel ? ' selected' : '') + '>' +
+        esc(r.name || r.id) + '（' + esc((r.steps || []).length || r.step_count || 0) + ' 步）</option>';
+    });
+    // 已保存的录制不在列表里（被删了/列表没拉到）也要留一个选项，否则一保存就把配置抹掉了
+    if (sel && !found) {
+      opts += '<option value="' + esc(sel) + '" selected>' + esc(sel) + '（找不到这个录制）</option>';
+    }
+    return opts;
+  }
+
+  function loadRecordings() {
+    if (REC_CACHE) return Promise.resolve(REC_CACHE);
+    return api('GET', '/api/recordings', undefined, { silent: true }).then(function (res) {
+      REC_CACHE = U().apiItems(res);
+      return REC_CACHE;
+    }).catch(function () {
+      REC_CACHE = REC_CACHE || [];
+      return REC_CACHE;
+    });
+  }
+
+  function refreshRecSelects(root) {
+    var list = (root || document).querySelectorAll('select[data-rec]');
+    Array.prototype.forEach.call(list, function (sel) {
+      var cur = sel.value;
+      sel.innerHTML = recOptions(cur);
+    });
   }
 
   function readConfigForm(root, pfx) {
@@ -244,12 +369,44 @@
         batch_size: numVal(root, pfx + '_batch', 200)
       },
       session: {
-        mode: val(root, pfx + '_smode') || 'none',
+        mode: 'browser',
         host: val(root, pfx + '_host'),
-        user_agent: val(root, pfx + '_ua'),
-        referer: val(root, pfx + '_referer'),
-        cookie: val(root, pfx + '_cookie')
+        header_mode: val(root, pfx + '_hmode') || 'all'
+      },
+      prelogin: readPreloginForm(root, pfx),
+      common: readCommonForm(root, pfx)
+    };
+  }
+
+  /** 公共参数：三样都空 = 没配（后端按 null 清掉） */
+  function readCommonForm(root, pfx) {
+    var params = parseKV(val(root, pfx + '_cmparams'), '=');
+    var headers = textToHeaders(val(root, pfx + '_cmheaders'));
+    var script = val(root, pfx + '_cmscript');
+    if (!Object.keys(params).length && !Object.keys(headers).length && !script) return null;
+    return { params: params, headers: headers, script: script };
+  }
+
+  /** 前置登录（UI 自动化）：没选录制就当作没配 */
+  function readPreloginForm(root, pfx) {
+    var onEl = root.querySelector('#' + pfx + '_plon');
+    var contEl = root.querySelector('#' + pfx + '_plcontinue');
+    var recId = val(root, pfx + '_plrec').trim();
+    if (!recId) return null;
+    var name = '';
+    if (REC_CACHE) {
+      for (var i = 0; i < REC_CACHE.length; i++) {
+        if (REC_CACHE[i].id === recId) { name = REC_CACHE[i].name || ''; break; }
       }
+    }
+    return {
+      enabled: !!(onEl && onEl.checked),
+      recording_id: recId,
+      recording_name: name,
+      mode: val(root, pfx + '_plmode') || 'always',
+      timeout_seconds: parseInt(val(root, pfx + '_pltimeout'), 10) || 180,
+      continue_on_error: !!(contEl && contEl.checked),
+      vars: parseKV(val(root, pfx + '_plvars'), '=')
     };
   }
 
@@ -259,7 +416,7 @@
     return {
       mode: p.mode || 'none',
       param: p.param || '',
-      in: p.in || 'query',
+      in: p.in || 'auto',
       start: p.start === undefined ? 0 : p.start,
       step: p.step || 0,
       page_size: p.page_size || 0,
@@ -367,18 +524,19 @@
   }
 
   /* ======================================================================
-   * 页面 1：#/collect —— 录制入口 + 任务列表
+   * 页面 1a：#/collect/captures —— 录制接口
    * ====================================================================== */
 
-  function renderList(app) {
+  function renderCaptures(app) {
     var root = pageRoot(app);
     var st = { lastLive: null };
 
-    root.innerHTML = headHtml('接口采集',
-      '在内置浏览器或你自己的浏览器（插件）里正常操作页面 → 录下真实请求 → 勾选要抓的接口 → 设定时间 → 自动抓取写入数据库。' +
+    root.innerHTML = headHtml('录制接口',
+      '在内置浏览器或你自己的浏览器（插件）里正常操作页面 → 录下真实请求 → 勾选要抓的接口 → 配置采集任务。' +
       '采集默认单任务串行、带随机间隔抖动、遇到 401/403/429 立即停手，不对目标站点造成压力。',
       '<button class="btn btn--sm" id="cap-refresh">刷新</button>' +
-      '<button class="btn btn--sm btn--danger" id="cap-clear">清空数据</button>') +
+      '<button class="btn btn--sm" data-goto="#/collect/tasks">采集任务 →</button>' +
+      '<button class="btn btn--sm btn--danger" id="cap-clear">清空采集数据</button>') +
       '<div class="card">' +
       '<div class="card-head"><h2>录制接口</h2>' +
       '<div class="card-tools"><span class="muted" id="cap-summary">加载中…</span></div></div>' +
@@ -387,34 +545,20 @@
       '<div id="cap-live"></div>' +
       '<div id="cap-form">' + captureFormHtml() + '</div>' +
       '<div id="cap-sessions"></div>' +
-      '</div></div>' +
-      '<div id="task-card" style="margin-top:16px">' + U().loadingCard('加载采集任务…') + '</div>' +
-      '<div id="files-card" style="margin-top:16px"></div>';
+      '</div></div>';
 
     loadOptions();
     refreshCaptures(root, st, true);
-    loadTasks(root);
-    renderFilesCard(root.querySelector('#files-card'), '');
 
     root.addEventListener('click', function (e) {
       var t = e.target;
       if (!t || !t.closest) return;
-      if (t.closest('#cap-refresh')) { refreshCaptures(root, st, true); loadTasks(root); renderFilesCard(root.querySelector('#files-card'), ''); return; }
+      if (t.closest('#cap-refresh')) { refreshCaptures(root, st, true); return; }
       if (t.closest('#cap-clear')) { openClearModal(root, st); return; }
-      if (t.closest('[data-files-refresh]')) { renderFilesCard(root.querySelector('#files-card'), ''); return; }
       if (t.closest('#cap-start')) { startCapture(root); return; }
       if (t.closest('#cap-stop')) { stopCapture(root, t.closest('#cap-stop').getAttribute('data-id')); return; }
       if (t.closest('#cap-open')) { go('#/collect/capture/' + encodeURIComponent(t.closest('#cap-open').getAttribute('data-id'))); return; }
       if (t.closest('#cap-del')) { deleteCapture(root, t.closest('#cap-del').getAttribute('data-id')); return; }
-      var act = t.closest('[data-task-act]');
-      if (act) {
-        var id = act.getAttribute('data-id');
-        var what = act.getAttribute('data-task-act');
-        if (what === 'open') { go('#/collect/task/' + encodeURIComponent(id)); return; }
-        if (what === 'run') { runTask(id); return; }
-        if (what === 'toggle') { toggleTask(id, act.getAttribute('data-status')); return; }
-        if (what === 'del') { deleteTask(id, root); return; }
-      }
       var link = t.closest('[data-goto]');
       if (link) { go(link.getAttribute('data-goto')); }
     });
@@ -438,17 +582,383 @@
     onCleanup(function () { clearInterval(timer); clearTimeout(st.urlTimer); });
   }
 
+  /* ======================================================================
+   * 页面 1b：#/collect/tasks —— 采集任务
+   * ====================================================================== */
+
+  function renderTasks(app) {
+    var root = pageRoot(app);
+    root.innerHTML = headHtml('采集任务',
+      '一个任务可以包含多个接口、各自的定时与限速。写入目标可以统一，也可以按接口分表 / 分文件（在任务详情里设置）。',
+      '<button class="btn btn--sm" data-goto="#/collect/captures">← 去录制接口</button>' +
+      '<button class="btn btn--sm" data-goto="#/collect/runs">执行日志 →</button>') +
+      '<div id="task-card">' + U().loadingCard('加载采集任务…') + '</div>';
+
+    loadTasks(root);
+
+    root.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('[data-tasks-refresh]')) { loadTasks(root); return; }
+      var act = t.closest('[data-task-act]');
+      if (act) {
+        var id = act.getAttribute('data-id');
+        var what = act.getAttribute('data-task-act');
+        if (what === 'open') { go('#/collect/task/' + encodeURIComponent(id)); return; }
+        if (what === 'run') { runTask(id); return; }
+        if (what === 'toggle') { toggleTask(id, act.getAttribute('data-status')); return; }
+        if (what === 'del') { deleteTask(id, root); return; }
+      }
+      var link = t.closest('[data-goto]');
+      if (link) { go(link.getAttribute('data-goto')); }
+    });
+  }
+
+  /* ======================================================================
+   * 页面 1c：#/collect/files —— 产出文件
+   * ====================================================================== */
+
+  function renderFiles(app) {
+    var root = pageRoot(app);
+    root.innerHTML = headHtml('产出文件',
+      'Excel / JSON / JSONL 落在 <数据目录>/harvest 下，可以直接下载；SQLite / MySQL / PostgreSQL 的数据在数据库里。',
+      '<button class="btn btn--sm" data-files-refresh="1">刷新</button>') +
+      '<div id="files-card">' + U().loadingCard('读取产出文件…') + '</div>';
+
+    renderFilesCard(root.querySelector('#files-card'), '');
+
+    root.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('[data-files-refresh]')) { renderFilesCard(root.querySelector('#files-card'), ''); }
+    });
+  }
+
+  /* ======================================================================
+   * 页面 1d：#/collect/sinks —— 数据写入（落库配置：新建 / 测试 / 保存 / 删除）
+   * ====================================================================== */
+
+  function driverLabel(driver) {
+    var list = (Opt.data && Opt.data.drivers) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].value === driver) return list[i].label;
+    return driver || '—';
+  }
+
+  function driverHint(driver) {
+    var list = (Opt.data && Opt.data.drivers) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].value === driver) return list[i].dsn_hint || '';
+    return '';
+  }
+
+  /** DSN 里的密码在列表里脱敏显示 */
+  function maskDSN(dsn) {
+    return String(dsn || '').replace(/\/\/([^:/@]+):([^@]*)@/g, '//$1:***@');
+  }
+
+  function sinkEditorHtml(p) {
+    var drivers = ((Opt.data && Opt.data.drivers) || []).map(function (d) { return [d.value, d.label]; });
+    if (!drivers.length) drivers = [['sqlite', 'SQLite'], ['xlsx', 'Excel'], ['json', 'JSON 文件']];
+    return '<div class="form-grid">' +
+      fld('配置名称 *', inputHtml('sk_name', p.name || '', 'placeholder="例如：商品表(MySQL)"')) +
+      fld('落库类型', selectHtml('sk_driver', drivers, p.driver || 'sqlite')) +
+      fld('表名 / 文件名', inputHtml('sk_table', p.table || 'harvest_records', 'placeholder="harvest_records"')) +
+      '</div>' +
+      '<div class="field"><label>DSN / 文件路径</label>' +
+      '<input class="input input--mono" id="sk_dsn" value="' + esc(p.dsn || '') + '" placeholder="mysql: user:pass@tcp(127.0.0.1:3306)/db?charset=utf8mb4">' +
+      '<span class="field-hint" id="sk_dsn_hint">' + esc(driverHint(p.driver || 'sqlite')) + '</span></div>' +
+      '<div class="form-grid">' +
+      fld('写入模式', selectHtml('sk_mode', [['append', '追加（append）'], ['upsert', '按唯一键覆盖（upsert）']], p.mode || 'append')) +
+      fld('唯一键列（upsert 用）', inputHtml('sk_key', p.key_column || '', 'placeholder="例如 id"')) +
+      fld('批量提交行数', numHtml('sk_batch', p.batch_size || 200, 'min="1"')) +
+      '</div>' +
+      '<div class="field"><label>备注</label>' +
+      '<input class="input" id="sk_note" value="' + esc(p.note || '') + '" placeholder="给团队看的一句话说明"></div>';
+  }
+
+  function renderSinks(app) {
+    var root = pageRoot(app);
+    var state = { items: [] };
+
+    root.innerHTML = headHtml('数据写入',
+      '这里维护可复用的落库配置：不同数据库 / 不同表 / 不同 Excel·JSON 文件各建一套。任务里引用一套即可；' +
+      '只想让某个接口单独写另一张表或另一个文件时，在任务详情里给那个接口填表名。',
+      '<button class="btn btn--sm btn--primary" data-act="new">新建配置</button>' +
+      '<button class="btn btn--sm" data-act="refresh">刷新</button>') +
+      '<div id="sink-list">' + U().loadingCard('加载落库配置…') + '</div>';
+
+    var host = root.querySelector('#sink-list');
+
+    function paint() {
+      var items = state.items;
+      if (!items.length) {
+        host.innerHTML = '<div class="card"><div class="card-body">' +
+          U().emptyCard('还没有落库配置',
+            '点右上角「新建配置」建一套：选类型（SQLite / Excel / JSON / MySQL / PostgreSQL）、填表名或文件名，保存后就能在任务里引用。',
+            '<button class="btn btn--primary" data-act="new">新建配置</button>') + '</div></div>';
+        return;
+      }
+      host.innerHTML = '<div class="card"><div class="card-head"><h2>落库配置 <span class="count-pill">' + items.length + '</span></h2>' +
+        '<div class="card-tools"><span class="muted">数据目录：' + esc((Opt.data && Opt.data.data_dir) || '') + '</span></div></div>' +
+        '<div class="table-wrap"><table class="table"><thead><tr>' +
+        '<th class="cell-name">名称</th><th style="width:150px">类型</th><th>写入目标</th>' +
+        '<th style="width:150px">模式</th><th>备注</th><th class="actions-cell" style="width:200px">操作</th>' +
+        '</tr></thead><tbody>' +
+        items.map(function (p) {
+          return '<tr><td><b>' + esc(p.name) + '</b>' +
+            (p.dsn ? '<div class="cell-sub mono">' + esc(maskDSN(p.dsn)) + '</div>' : '') + '</td>' +
+            '<td><span class="chip">' + esc(driverLabel(p.driver)) + '</span></td>' +
+            '<td class="mono">' + esc(p.target || p.table || '') + '</td>' +
+            '<td>' + esc(p.mode === 'upsert' ? ('覆盖（按 ' + (p.key_column || '—') + '）') : '追加') + '</td>' +
+            '<td class="muted">' + esc(p.note || '—') + '</td>' +
+            '<td class="actions-cell">' +
+            '<button class="btn btn--sm" data-act="test" data-id="' + esc(p.id) + '">测试连接</button>' +
+            '<button class="btn btn--sm" data-act="edit" data-id="' + esc(p.id) + '">编辑</button>' +
+            '<button class="btn btn--sm btn--danger" data-act="del" data-id="' + esc(p.id) + '">删除</button>' +
+            '</td></tr>';
+        }).join('') + '</tbody></table></div></div>';
+    }
+
+    function load() {
+      return api('GET', '/api/collect/sinks', undefined, { silent: true }).then(function (res) {
+        state.items = U().apiItems(res);
+        paint();
+      }).catch(function (err) {
+        host.innerHTML = U().errorCard(err.message || '读取落库配置失败');
+      });
+    }
+
+    function readForm(overlay) {
+      var q = function (id) { var el = overlay.querySelector('#' + id); return el ? el.value : ''; };
+      return {
+        name: q('sk_name').trim(),
+        driver: q('sk_driver'),
+        table: q('sk_table').trim(),
+        dsn: q('sk_dsn').trim(),
+        mode: q('sk_mode'),
+        key_column: q('sk_key').trim(),
+        batch_size: parseInt(q('sk_batch'), 10) || 200,
+        note: q('sk_note').trim()
+      };
+    }
+
+    function openEditor(item) {
+      var p = item || {};
+      var m = U().openModal({
+        title: item ? ('编辑落库配置 · ' + (p.name || '')) : '新建落库配置',
+        width: 720,
+        body: sinkEditorHtml(p),
+        footer: '<button class="btn" data-modal-close>取消</button>' +
+          '<button class="btn" id="sk_test">测试连接</button>' +
+          '<button class="btn btn--primary" id="sk_save">保存</button>'
+      });
+
+      // 类型换了就换 DSN 提示
+      var drv = m.overlay.querySelector('#sk_driver');
+      if (drv) {
+        drv.addEventListener('change', function () {
+          var hint = m.overlay.querySelector('#sk_dsn_hint');
+          if (hint) hint.textContent = driverHint(drv.value);
+        });
+      }
+
+      m.overlay.querySelector('#sk_test').addEventListener('click', function () {
+        var body = readForm(m.overlay);
+        if (body.driver === '') { toast('先选择落库类型', 'error'); return; }
+        api('POST', '/api/collect/sinks/test', body, { silent: true })
+          .then(function (res) { toast((res && res.message) || '连接成功', 'success'); })
+          .catch(function (err) { toast((err && err.message) || '连接失败', 'error', 6000); });
+      });
+
+      m.overlay.querySelector('#sk_save').addEventListener('click', function () {
+        var body = readForm(m.overlay);
+        if (!body.name) { toast('配置名称必填', 'error'); return; }
+        var req = item
+          ? api('PUT', '/api/collect/sinks/' + encodeURIComponent(item.id), body)
+          : api('POST', '/api/collect/sinks', body);
+        req.then(function () {
+          toast('已保存', 'success');
+          m.close();
+          load();
+        }).catch(function () { });
+      });
+    }
+
+    function removeItem(p) {
+      U().confirmDialog({
+        title: '删除落库配置',
+        message: '删除「' + (p.name || '') + '」后，已经引用它的任务不受影响（配置值已复制进任务），之后不能再选它。'
+      }).then(function (ok) {
+        if (!ok) return;
+        api('DELETE', '/api/collect/sinks/' + encodeURIComponent(p.id)).then(function () {
+          toast('已删除', 'success');
+          load();
+        }).catch(function () { });
+      });
+    }
+
+    function testItem(p) {
+      api('POST', '/api/collect/sinks/test', { id: p.id }, { silent: true })
+        .then(function (res) { toast((res && res.message) || '连接成功', 'success'); })
+        .catch(function (err) { toast((err && err.message) || '连接失败', 'error', 6000); });
+    }
+
+    function find(id) {
+      for (var i = 0; i < state.items.length; i++) if (state.items[i].id === id) return state.items[i];
+      return null;
+    }
+
+    root.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      var el = t.closest('[data-act]');
+      if (el) {
+        var act = el.getAttribute('data-act');
+        var id = el.getAttribute('data-id');
+        if (act === 'new') { openEditor(null); return; }
+        if (act === 'refresh') { load(); return; }
+        if (act === 'edit') { var p = find(id); if (p) openEditor(p); return; }
+        if (act === 'del') { var p2 = find(id); if (p2) removeItem(p2); return; }
+        if (act === 'test') { var p3 = find(id); if (p3) testItem(p3); return; }
+      }
+      var link = t.closest('[data-goto]');
+      if (link) { go(link.getAttribute('data-goto')); }
+    });
+
+    loadOptions();
+    load();
+  }
+
+  /* ======================================================================
+   * 页面 1e：#/collect/runs —— 执行日志（请求 / 响应 / 写入情况）
+   * ====================================================================== */
+
+  function renderRuns(app) {
+    var root = pageRoot(app);
+    var state = { items: [], tasks: [], taskID: '' };
+
+    root.innerHTML = headHtml('执行日志',
+      '每次采集的请求数、解析条数、写入行数；点「查看」进详情，运行日志里按顺序记着每一次请求与响应（明文，含 Cookie / 请求头 / 请求体 / 响应体）。',
+      '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
+      '<button class="btn btn--sm btn--danger" data-act="clear">清空日志</button>') +
+      '<div class="card">' +
+      '<div class="card-toolbar">' +
+      '<div class="field" style="margin:0;min-width:220px"><label>按任务筛选</label>' +
+      '<select class="input" id="run-filter"><option value="">全部任务</option></select></div>' +
+      '<div class="toolbar-right"><span class="muted" id="run-count"></span></div>' +
+      '</div>' +
+      '<div id="run-table">' + U().loadingCard('加载执行日志…') + '</div>' +
+      '</div>';
+
+    var host = root.querySelector('#run-table');
+    var filterEl = root.querySelector('#run-filter');
+    var countEl = root.querySelector('#run-count');
+
+    function paint() {
+      var items = state.items;
+      if (countEl) countEl.textContent = items.length ? ('共 ' + items.length + ' 条') : '';
+      if (!items.length) {
+        host.innerHTML = U().emptyCard('还没有执行记录',
+          '去「采集任务」里点「立即运行」，或等定时触发；跑一次这里就会有一条记录。',
+          '<button class="btn btn--primary" data-goto="#/collect/tasks">去采集任务</button>');
+        return;
+      }
+      host.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr>' +
+        '<th style="width:150px">开始时间</th><th class="cell-name">任务</th><th style="width:74px">触发</th>' +
+        '<th style="width:96px">结果</th><th class="num" style="width:70px">请求</th>' +
+        '<th class="num" style="width:70px">解析</th><th class="num" style="width:70px">写入</th>' +
+        '<th style="width:90px">耗时</th><th>写入目标</th><th class="actions-cell" style="width:90px">操作</th>' +
+        '</tr></thead><tbody>' +
+        items.map(function (r) {
+          var cost = r.finished_at ? spanText(r.started_at, r.finished_at) : '进行中';
+          return '<tr><td class="nowrap">' + esc(fmtDateTime(r.started_at)) + '</td>' +
+            '<td class="cell-name">' + esc(r.task_name || r.task_id) +
+            '<div class="cell-sub mono">' + esc(r.id) + '</div></td>' +
+            '<td>' + esc(r.trigger === 'schedule' ? '定时' : '手动') + '</td>' +
+            '<td>' + runStatusBadge(r.status) + '</td>' +
+            '<td class="num">' + esc(r.requests || 0) + '</td>' +
+            '<td class="num">' + esc(r.fetched || 0) + '</td>' +
+            '<td class="num">' + esc(r.written || 0) + '</td>' +
+            '<td class="nowrap">' + esc(cost) + '</td>' +
+            '<td class="muted">' + esc(r.sink || '—') + '</td>' +
+            '<td class="actions-cell"><button class="btn btn--sm" data-goto="#/collect/run/' + esc(r.id) + '">查看</button></td>' +
+            '</tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    function load() {
+      var q = '/api/collect/runs?limit=100' + (state.taskID ? '&task_id=' + encodeURIComponent(state.taskID) : '');
+      return api('GET', q, undefined, { silent: true }).then(function (res) {
+        state.items = U().apiItems(res);
+        paint();
+      }).catch(function (err) {
+        host.innerHTML = U().errorCard(err.message || '读取执行日志失败');
+      });
+    }
+
+    function loadTasks() {
+      return api('GET', '/api/collect/tasks', undefined, { silent: true }).then(function (res) {
+        state.tasks = U().apiItems(res);
+        if (!filterEl) return;
+        filterEl.innerHTML = '<option value="">全部任务</option>' + state.tasks.map(function (t) {
+          return '<option value="' + esc(t.id) + '">' + esc(t.name) + '</option>';
+        }).join('');
+        filterEl.value = state.taskID;
+      }).catch(function () { });
+    }
+
+    if (filterEl) {
+      filterEl.addEventListener('change', function () {
+        state.taskID = filterEl.value;
+        load();
+      });
+    }
+
+    root.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('[data-act="refresh"]')) { load(); return; }
+      if (t.closest('[data-act="clear"]')) {
+        U().confirmDialog({ title: '清空执行日志', message: '只删除历史运行记录，任务配置与已经写入的数据不受影响。确定清空？' })
+          .then(function (ok) {
+            if (!ok) return;
+            api('DELETE', '/api/collect/runs?all=1').then(function (res) {
+              toast((res && res.message) || '已清空', 'success');
+              load();
+            }).catch(function () { });
+          });
+        return;
+      }
+      var link = t.closest('[data-goto]');
+      if (link) { go(link.getAttribute('data-goto')); }
+    });
+
+    loadTasks();
+    load();
+  }
+
   var START_URL_KEY = 'uitest.collect.startUrl';
+  var CAP_SCOPE_KEY = 'uitest.collect.scope';
+  var CAP_BODIES_KEY = 'uitest.collect.bodies';
+
+  /** 录制范围偏好（记住上次的选择，避免每次都被重置回"只要接口"） */
+  function capScopePref() {
+    try { return lsRead(CAP_SCOPE_KEY) === 'all' ? 'all' : 'xhr'; } catch (e) { return 'xhr'; }
+  }
+
+  /** 响应体偏好 */
+  function capBodiesPref() {
+    try { return lsRead(CAP_BODIES_KEY) === '0' ? '0' : '1'; } catch (e) { return '1'; }
+  }
 
   function captureFormHtml() {
     return '<div class="form-grid">' +
       fld('起始页地址', inputHtml('cap_url', startUrlPref(), 'placeholder="https://你的系统/列表页"')) +
-      fld('录制范围', selectHtml('cap_types', [['xhr', 'XHR + Fetch（只要接口）'], ['all', '含页面文档']], 'xhr')) +
-      fld('响应体', selectHtml('cap_bodies', [['1', '抓（推荐，用于字段识别）'], ['0', '不抓（只看请求）']], '1')) +
+      fld('录制范围', selectHtml('cap_types', [['xhr', 'XHR + Fetch（只要接口）'], ['all', '含页面文档（XHR + Fetch + Document）']], capScopePref())) +
+      fld('响应体', selectHtml('cap_bodies', [['1', '抓（推荐，用于字段识别）'], ['0', '不抓（只看请求）']], capBodiesPref())) +
       '</div>' +
       '<div class="ds-actions"><button class="btn btn--primary" id="cap-start">开始录制</button>' +
       '<span class="field-hint" style="margin-left:10px">会打开一个内置浏览器标签页，你在里面正常登录 / 点列表 / 翻页即可；' +
-      '也可以改用浏览器插件在你自己的浏览器里录（插件弹窗里勾「同时录制接口请求」）。</span></div>';
+      '「含页面文档」会额外录下页面本身（HTML）的请求，适合强缓存看不到接口的情况。</span></div>';
   }
 
   /** 只刷新"录制中横幅 + 会话列表 + 汇总"，不重建表单（否则会把正在输入的起始页刷掉） */
@@ -504,7 +1014,8 @@
         '</tr></thead><tbody>' +
         items.map(function (c) {
           return '<tr><td><div class="url-cell">' + esc(c.page_url || '(空白页)') + '</div></td>' +
-            '<td>' + (c.source === 'extension' ? '<span class="chip">浏览器插件</span>' : '<span class="chip">内置浏览器</span>') + '</td>' +
+            '<td>' + (c.source === 'extension' ? '<span class="chip">浏览器插件</span>' : '<span class="chip">内置浏览器</span>') +
+            (c.types && c.types.length ? '<div class="cell-sub">' + esc(c.types.join('+')) + '</div>' : '') + '</td>' +
             '<td>' + esc(fmtDateTime(c.started_at)) + '</td>' +
             '<td class="num">' + esc(c.count || 0) + '</td>' +
             '<td>' + (c.stopped ? '<span class="badge badge--draft"><i class="dot"></i>已停止</span>'
@@ -618,10 +1129,12 @@
     var scope = val(root, 'cap_types');
     var bodies = val(root, 'cap_bodies') === '1';
     var types = scope === 'all' ? ['XHR', 'Fetch', 'Document'] : ['XHR', 'Fetch'];
+    lsWrite(CAP_SCOPE_KEY, scope === 'all' ? 'all' : 'xhr');
+    lsWrite(CAP_BODIES_KEY, bodies ? '1' : '0');
     api('POST', '/api/collect/captures', {
       start_url: url, types: types, capture_bodies: bodies
     }).then(function (res) {
-      toast('已开始录制，请在内置浏览器里正常操作', 'success');
+      toast('已开始录制（范围：' + types.join(' + ') + '），请在内置浏览器里正常操作', 'success');
       if (res && res.capture && res.capture.id) {
         go('#/collect/capture/' + encodeURIComponent(res.capture.id));
       }
@@ -643,7 +1156,7 @@
         api('DELETE', '/api/collect/captures/' + encodeURIComponent(id)).then(function () {
           toast('已丢弃这次录制', 'success');
           if (root && root.querySelector) refreshCaptures(root, { lastLive: null }, true);
-          else go('#/collect');
+          else go('#/collect/captures');
         }).catch(function () { });
       });
   }
@@ -660,7 +1173,7 @@
         return;
       }
       host.innerHTML = '<div class="card"><div class="card-head"><h2>采集任务 <span class="count-pill">' + items.length + '</span></h2>' +
-        '<div class="card-tools"><button class="btn btn--sm" id="cap-refresh">刷新</button></div></div><div class="card-body">' +
+        '<div class="card-tools"><button class="btn btn--sm" data-tasks-refresh="1">刷新</button></div></div><div class="card-body">' +
         '<div class="table-wrap"><table class="table"><thead><tr>' +
         '<th class="cell-name">任务</th><th>接口</th><th>计划</th><th>下次触发</th><th>最近结果</th>' +
         '<th class="num">写入行数</th><th class="actions-cell">操作</th></tr></thead><tbody>' +
@@ -705,7 +1218,7 @@
         location.reload();
       } else {
         var app = document.getElementById('app');
-        if (app) { app.innerHTML = ''; renderList(app); }
+        if (app) { app.innerHTML = ''; renderTasks(app); }
       }
     }).catch(function () { });
   }
@@ -730,7 +1243,12 @@
     var state = {
       id: id,
       data: null,
-      filter: { q: '', method: '', type: '', kind: '', with_body: false, json: false, include: '', exclude: '', host: '' },
+      filter: {
+        q: '', method: '', type: '',
+        include: '', exclude: '',
+        with_body: false, json: false,
+        min_status: 0, max_status: 0
+      },
       sel: {},
       timer: null
     };
@@ -752,12 +1270,13 @@
       '</div>' +
       '<div id="cap-meta" class="muted" style="margin-bottom:10px">加载中…</div>' +
       '<div id="cap-table"></div>' +
+      '</div></div>' +
+      // 勾选操作条放在卡片外：.card 是 overflow:hidden，放里面 sticky 会失效
       '<div class="sel-bar"><div class="grow" id="sel-info">已选 0 个接口</div>' +
       '<button class="btn btn--sm" data-act="sel-all">全选当前筛选结果</button>' +
       '<button class="btn btn--sm" data-act="sel-none">清空选择</button>' +
       '<button class="btn btn--sm btn--danger" data-act="del-sel" disabled>删除选中</button>' +
-      '<button class="btn btn--primary" data-act="next" disabled>下一步：配置采集任务（定时 + 落库）</button></div>' +
-      '</div></div>';
+      '<button class="btn btn--primary" data-act="next" disabled>下一步：配置采集任务（定时 + 落库）</button></div>';
 
     function filterQuery() {
       var f = state.filter;
@@ -765,8 +1284,6 @@
       if (f.q) q.push('q=' + encodeURIComponent(f.q));
       if (f.method) q.push('method=' + encodeURIComponent(f.method));
       if (f.type) q.push('type=' + encodeURIComponent(f.type));
-      if (f.kind) q.push('kind=' + encodeURIComponent(f.kind));
-      if (f.host) q.push('host=' + encodeURIComponent(f.host));
       if (f.include) q.push('include=' + encodeURIComponent(f.include));
       if (f.exclude) q.push('exclude=' + encodeURIComponent(f.exclude));
       if (f.with_body) q.push('with_body=1');
@@ -812,12 +1329,20 @@
           : '<span class="chip">内置浏览器录制</span>');
       }
       if (meta && meta.page_url) parts.push('页面 ' + esc(meta.page_url));
+      if (meta && meta.types && meta.types.length) parts.push('范围 ' + esc(meta.types.join(' + ')));
       if (meta && meta.started_at) parts.push('开始于 ' + esc(fmtDateTime(meta.started_at)));
       parts.push(meta && meta.stopped ? '已停止录制' : '<span style="color:#4f46e5">录制中…</span>');
       if (facets) {
         parts.push('共 ' + facets.total + ' 条，筛选后 ' + facets.kept + ' 条');
         var methods = Object.keys(facets.by_method || {}).map(function (k) { return k + ' ' + facets.by_method[k]; });
         if (methods.length) parts.push(methods.join(' / '));
+        // 按类型统计：一眼看出「页面文档」到底有没有录到
+        var tps = Object.keys(facets.by_type || {}).map(function (k) { return k + ' ' + facets.by_type[k]; });
+        if (tps.length) parts.push('类型 ' + tps.join(' / '));
+        if (meta && meta.skipped) {
+          var sk = Object.keys(meta.skipped).map(function (k) { return k + ' ' + meta.skipped[k]; });
+          if (sk.length) parts.push('范围外跳过 ' + sk.join(' / '));
+        }
         if (facets.hosts && facets.hosts.length) parts.push('站点：' + facets.hosts.map(esc).join('、'));
       }
       host.innerHTML = parts.join(' · ');
@@ -840,7 +1365,7 @@
         '<th style="width:60px">响应</th><th style="width:60px">操作</th></tr></thead><tbody>' +
         items.map(function (it) {
           var picked = !!state.sel[it.id];
-          return '<tr data-row="' + esc(it.id) + '"' + (picked ? ' class="is-selected"' : '') + '>' +
+          return '<tr' + (picked ? ' class="is-selected"' : '') + '>' +
             '<td class="check-cell"><input type="checkbox" class="row-check" data-pick="' + esc(it.id) + '"' + (picked ? ' checked' : '') + '></td>' +
             '<td class="muted">' + esc(it.index) + '</td>' +
             '<td>' + methodChip(it.method) + '</td>' +
@@ -938,7 +1463,7 @@
       if (!t || !t.closest) return;
       var actEl = t.closest('[data-act]');
       var act = actEl ? actEl.getAttribute('data-act') : '';
-      if (act === 'back') { go('#/collect'); return; }
+      if (act === 'back') { go('#/collect/captures'); return; }
       if (act === 'refresh') { load(); return; }
       if (act === 'stop') {
         api('POST', '/api/collect/captures/' + encodeURIComponent(state.id) + '/stop', {}).then(function (res) {
@@ -1052,6 +1577,7 @@
         footer: '<button class="btn" data-modal-close>取消</button>' +
           '<button class="btn btn--primary" id="t_save">创建任务</button>'
       });
+      loadRecordings().then(function () { refreshRecSelects(m.overlay); }).catch(function () { });
 
       m.overlay.querySelector('#t_save').addEventListener('click', function () {
         var cfg = readConfigForm(m.overlay, 't');
@@ -1064,7 +1590,9 @@
           schedule: cfg.schedule,
           throttle: cfg.throttle,
           sink: cfg.sink,
-          session: cfg.session
+          session: cfg.session,
+          prelogin: cfg.prelogin,
+          common: cfg.common
         };
         if (!payload.name) { toast('请填写任务名称', 'error'); return; }
         api('POST', '/api/collect/tasks', payload).then(function (task) {
@@ -1082,25 +1610,28 @@
 
   function renderTask(app, id) {
     var root = pageRoot(app);
-    var state = { id: id, task: null };
+    var state = { id: id, task: null, profiles: [], tkTab: 'overview' };
 
-    root.innerHTML = headHtml('采集任务', '定时、限速、落库、登录态都在这里调；改完点「保存」。',
+    root.innerHTML = headHtml('采集任务',
+      '按页签分区：概览 / 公共参数 / 登录 / 接口设计 / 调度与落库 / 文件产出 / 最近运行。' +
+      '接口块里可以改请求头、请求体、分页，也能看到录制时的原始请求数据（明文）；公共参数里的变量还能在 URL 里用 {{变量名}}。改完点「保存配置」。',
       '<button class="btn btn--sm" data-act="back">返回列表</button>' +
       '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
       '<button class="btn btn--sm btn--primary" data-act="run">立即运行</button>' +
       '<button class="btn btn--sm" data-act="preview">试抓预览</button>' +
+      '<button class="btn btn--sm" data-act="selftest">自检</button>' +
       '<button class="btn btn--sm btn--ghost" data-act="test-sink">测试落库</button>' +
       '<button class="btn btn--sm btn--danger" data-act="del">删除任务</button>') +
-      '<div id="task-body">' + U().loadingCard('加载任务…') + '</div>' +
-      '<div id="task-files" style="margin-top:16px"></div>' +
-      '<div id="task-runs" style="margin-top:16px"></div>';
+      '<div id="task-body">' + U().loadingCard('加载任务…') + '</div>';
 
     function load() {
-      api('GET', '/api/collect/tasks/' + encodeURIComponent(state.id)).then(function (task) {
-        state.task = task;
-        paint(task);
-        loadRuns();
-        loadFiles(task);
+      Promise.all([
+        api('GET', '/api/collect/tasks/' + encodeURIComponent(state.id)),
+        api('GET', '/api/collect/sinks', undefined, { silent: true }).catch(function () { return { items: [] }; })
+      ]).then(function (out) {
+        state.profiles = U().apiItems(out[1]);
+        state.task = out[0];
+        paint(state.task);
       }).catch(function (err) {
         root.querySelector('#task-body').innerHTML = U().errorCard(err.message || '任务不存在');
       });
@@ -1109,6 +1640,9 @@
     function paint(task) {
       var host = root.querySelector('#task-body');
       var eps = task.endpoints || [];
+      function tabBtn(key, label, tip) {
+        return '<button class="tk-tab" data-tk-tab="' + key + '" title="' + esc(tip || label) + '">' + esc(label) + '</button>';
+      }
       host.innerHTML = '<div class="card"><div class="card-head"><h2>' + esc(task.name) + ' ' +
         taskStatusBadge(task.status, task.running) + '</h2>' +
         '<div class="card-tools"><span class="muted">' + esc(task.schedule_text || '') + '</span></div></div>' +
@@ -1121,19 +1655,124 @@
         '<div><span>累计运行</span><b>' + esc(task.run_count || 0) + ' 次</b></div>' +
         '</div>' +
         (task.last_error ? '<div class="alert alert--warn">' + esc(task.last_error) + '</div>' : '') +
+        // 分区页签：不再一页长表单
+        '<nav class="tk-tabs" id="tk-tabs">' +
+        tabBtn('overview', '概览', '任务名称 / 说明 / 起始页') +
+        tabBtn('common', '公共参数', '所有接口共用的 query/body 参数、请求头、登录后脚本') +
+        tabBtn('login', '登录', '前置登录（UI 自动化）+ 浏览器会话共享') +
+        tabBtn('eps', '接口设计', '每个接口的方法 / URL / 分页 / 请求头 / 请求体 / 字段映射') +
+        tabBtn('runtime', '调度与落库', '定时、限速、写入目标') +
+        tabBtn('files', '文件产出', '这个任务产出的 Excel / JSON / JSONL，直接下载') +
+        tabBtn('runs', '最近运行', '这个任务的运行记录，点进去看明文报文与 SQL') +
+        '</nav>' +
+        '<div class="tk-pane" data-pane="overview">' +
         '<div class="form-grid">' +
         fld('任务名称', inputHtml('tk_name', task.name)) +
         fld('说明', inputHtml('tk_desc', task.description || '')) +
         fld('起始页 / Referer', inputHtml('tk_start', task.start_url || '')) +
         '</div>' +
+        '<div class="ds-actions"><button class="btn btn--primary" data-act="save">保存配置</button>' +
+        '<span class="field-hint" style="margin-left:10px">保存后定时计划立即生效（改计划会重算下次触发时间）。</span></div>' +
+        '</div>' +
+        '<div class="tk-pane" data-pane="common" hidden></div>' +
+        '<div class="tk-pane" data-pane="login" hidden></div>' +
+        '<div class="tk-pane" data-pane="eps" hidden>' +
         '<div class="ds-block"><div class="ds-block-title">接口（' + eps.length + ' 个，勾选框控制是否参与采集）</div>' +
         '<div id="ep-list">' + eps.map(epBlockHtml).join('') + '</div>' +
         '</div>' +
-        configFormHtml('tk', task) +
-        '<div class="ds-actions"><button class="btn btn--primary" data-act="save">保存配置</button>' +
-        '<span class="field-hint" style="margin-left:10px">保存后定时计划立即生效（改计划会重算下次触发时间）。' +
-        '接口块点左侧 ▸ 可展开 / 收起。</span></div>' +
-        '</div></div>';
+        '</div>' +
+        '<div class="tk-pane" data-pane="runtime" hidden>' +
+        '<div class="ds-block"><div class="ds-block-title"><span>写入目标</span>' +
+        '<span class="muted">' + esc(task.sink_target || '') + '</span></div>' +
+        '<div class="form-grid">' +
+        fld('引用「数据写入」配置', selectHtml('tk_profile', profileOptions(), task.sink_profile_id || ''),
+          '选一套会把它的连接 / 表名复制到本任务；之后改配置不会再影响这个任务') +
+        '</div>' +
+        '<label class="check-line" style="margin-top:6px"><input type="checkbox" id="tk_split"' +
+        (task.split_by_endpoint ? ' checked' : '') + '> 每个接口单独分表 / 分文件' +
+        '<span class="field-hint">　表名 = 任务表名 + "_" + 接口名；某个接口单独填了表名就以接口为准</span></label>' +
+        '</div>' +
+        // 定时 / 限速 / 落库三块由下面从 #tk-cfg 里搬进来
+        '<div class="ds-actions"><button class="btn btn--primary" data-act="save">保存配置</button></div>' +
+        '</div>' +
+        // 文件产出 / 最近运行：以前堆在页面底部，现在各自一个页签
+        '<div class="tk-pane" data-pane="files" hidden><div id="task-files"></div></div>' +
+        '<div class="tk-pane" data-pane="runs" hidden><div id="task-runs"></div></div>' +
+        // 参数表单先整份渲染在隐藏容器里，再按标题搬到对应页签（保持 readConfigForm 的 id 约定不变）
+        '<div id="tk-cfg" hidden>' + configFormHtml('tk', task) + '</div>' +
+        '</div></div>' +
+        '</div>';
+
+      // 把配置块分配到页签：公共参数 / 登录 / 调度与落库
+      (function distribute() {
+        var cfgHost = host.querySelector('#tk-cfg');
+        if (!cfgHost) return;
+        var paneCommon = host.querySelector('[data-pane="common"]');
+        var paneLogin = host.querySelector('[data-pane="login"]');
+        var paneRuntime = host.querySelector('[data-pane="runtime"]');
+        Array.prototype.slice.call(cfgHost.children).forEach(function (el) {
+          if (!el.classList || !el.classList.contains('ds-block')) return;
+          var titleEl = el.querySelector('.ds-block-title');
+          var title = titleEl ? titleEl.textContent : '';
+          var target = paneRuntime;
+          if (title.indexOf('公共参数') >= 0) target = paneCommon;
+          else if (title.indexOf('登录态') >= 0 || title.indexOf('前置登录') >= 0) target = paneLogin;
+          if (target) target.appendChild(el);
+        });
+        if (cfgHost.parentNode) cfgHost.parentNode.removeChild(cfgHost);
+      })();
+
+      // 页签切换
+      (function wireTabs() {
+        var nav = host.querySelector('#tk-tabs');
+        if (!nav) return;
+        var panes = host.querySelectorAll('.tk-pane');
+        function show(key) {
+          state.tkTab = key;
+          Array.prototype.forEach.call(nav.querySelectorAll('.tk-tab'), function (b) {
+            b.classList.toggle('active', b.getAttribute('data-tk-tab') === key);
+          });
+          Array.prototype.forEach.call(panes, function (p) {
+            p.hidden = p.getAttribute('data-pane') !== key;
+          });
+        }
+        nav.addEventListener('click', function (e) {
+          var b = e.target.closest ? e.target.closest('[data-tk-tab]') : null;
+          if (!b) return;
+          show(b.getAttribute('data-tk-tab'));
+        });
+        show(state.tkTab || 'overview');
+      })();
+
+      // 「登录流程录制」下拉需要录制列表：异步补一次（只拉一次）
+      loadRecordings().then(function () { refreshRecSelects(host); }).catch(function () { });
+
+      // 文件产出 / 最近运行两个页签的内容（重新渲染后容器是新的，必须重拉）
+      loadRuns();
+      loadFiles(task);
+    }
+
+    function profileOptions() {
+      var out = [['', '（不引用，直接用任务里的配置）']];
+      (state.profiles || []).forEach(function (p) {
+        out.push([p.id, p.name + ' · ' + (p.target || p.table || '')]);
+      });
+      return out;
+    }
+
+    /** 把选中的落库配置填进表单（保存后就是任务自己的值） */
+    function applyProfile(pid) {
+      var p = null;
+      (state.profiles || []).forEach(function (x) { if (x.id === pid) p = x; });
+      if (!p) return;
+      var set = function (id, v) { var el = root.querySelector('#' + id); if (el) el.value = v; };
+      set('tk_driver', p.driver || 'sqlite');
+      set('tk_dsn', p.dsn || '');
+      set('tk_table', p.table || 'harvest_records');
+      set('tk_sinkmode', p.mode || 'append');
+      set('tk_key', p.key_column || '');
+      set('tk_batch', p.batch_size || 200);
+      toast('已填入「' + p.name + '」的连接信息，点保存生效', 'info');
     }
 
     /** 产出文件（只显示这个任务表名对应的文件） */
@@ -1143,7 +1782,9 @@
       var table = (task && task.sink && task.sink.table) || '';
       var driver = ((task && task.sink && task.sink.driver) || '').toLowerCase();
       if (driver === 'mysql' || driver === 'postgres' || driver === 'postgresql') {
-        host.innerHTML = '';
+        host.innerHTML = '<div class="card"><div class="card-head"><h2>文件产出</h2></div>' +
+          '<div class="card-body muted">这个任务直接写数据库（' + esc(driver) + '），没有文件产出。' +
+          '想看数据请连库查表，或把「写入数据库」改成 Excel / JSON 再跑一次。</div></div>';
         return;
       }
       renderFilesCard(host, table);
@@ -1155,6 +1796,33 @@
       return null;
     }
 
+    /** 把录制快照填进"可编辑的"请求头 / 请求体（只改表单，点保存才生效） */
+    function fillSample(eid, what) {
+      var ep = findEp(eid);
+      if (!ep) return;
+      var hEl = root.querySelector('#ep_headers_' + eid);
+      var bEl = root.querySelector('#ep_body_' + eid);
+      var filled = [];
+      if (what === 'headers' || what === 'all') {
+        var txt = headersToText(sessionlessHeaders(ep.sample_headers));
+        if (hEl && txt) { hEl.value = txt; filled.push('请求头'); }
+        else if (what === 'headers') toast('这条接口没有录制到的请求头', 'error');
+      }
+      if (what === 'body' || what === 'all') {
+        var body = stripTruncMark(ep.sample_req_body);
+        if (bEl && body) { bEl.value = body; filled.push('请求体'); }
+        else if (what === 'body') toast('录制时没有请求体（GET 一般是空的）', 'info');
+      }
+      if (filled.length) {
+        // 展开「请求头 / 请求体」折叠区，方便直接改
+        var box = root.querySelector('#ep_reqbox_' + eid);
+        if (box) box.open = true;
+        toast('已填入 ' + filled.join(' / ') + '，改完点「保存配置」生效', 'success');
+        if (hEl && (what === 'headers' || what === 'all')) hEl.focus();
+        else if (bEl) bEl.focus();
+      }
+    }
+
     // 接口块默认折叠（只留标题行），需要改的时候点开——多接口任务不再一屏塞满
     function epBlockHtml(ep, i) {
       var fields = (ep.fields || []).map(function (f) {
@@ -1162,11 +1830,14 @@
       }).join('') || '<span class="muted">未配置字段（运行时会按响应自动识别）</span>';
       var pg = normalizePag(ep.pagination);
       var opened = isEpOpen(ep.id, i);
+      var eff = (state.task && state.task.endpoint_sinks && state.task.endpoint_sinks[ep.id]) || null;
+      var targetText = eff && eff.table ? ' · 写入 ' + eff.table : '';
       var summary = '<span class="ep-summary">' + esc(String(ep.method || 'GET').toUpperCase()) +
         ' · ' + esc(pagShort(pg)) +
-        ' · ' + (ep.fields || []).length + ' 字段' +
+        ' · ' + (ep.fields || []).length + ' 字段' + esc(targetText) +
+        ((ep.headers && Object.keys(ep.headers).length) ? ' · ' + Object.keys(ep.headers).length + ' 请求头' : '') +
         (ep.enabled === false ? ' · <span style="color:var(--red)">未启用</span>' : '') + '</span>';
-      return '<div class="ep-block' + (opened ? ' is-open' : '') + '" data-ep="' + esc(ep.id) + '">' +
+      return '<div class="ep-block' + (opened ? ' is-open' : '') + '">' +
         '<div class="ep-head">' +
         '<button class="ep-chev" type="button" data-ep-toggle="' + esc(ep.id) + '" title="展开 / 收起">' +
         (opened ? '▾' : '▸') + '</button>' +
@@ -1176,6 +1847,9 @@
         '<input class="input" style="flex:1 1 160px" id="ep_name_' + esc(ep.id) + '" data-ep-name="' + esc(ep.id) + '" value="' + esc(ep.name) + '">' +
         summary +
         '<button class="btn btn--sm" data-ep-fields="' + esc(ep.id) + '">字段映射</button>' +
+        '<button class="btn btn--sm" data-ep-preview="' + esc(ep.id) + '" title="只抓这一个接口的第一页（不写库）">试抓</button>' +
+        '<button class="btn btn--sm" data-ep-pgall="' + esc(ep.id) + '" title="把这个接口的分页配置套到所有接口">分页套用全部</button>' +
+        '<button class="btn btn--sm" data-ep-hdrall="' + esc(ep.id) + '" title="把这个接口的请求头套到所有接口">请求头套用全部</button>' +
         '<button class="btn btn--sm btn--danger" data-ep-del="' + esc(ep.id) + '">删除</button>' +
         '</div>' +
         '<div class="ep-body">' +
@@ -1183,15 +1857,29 @@
         fld('方法', selectHtml('ep_method_' + ep.id, [['GET', 'GET'], ['POST', 'POST'], ['PUT', 'PUT'], ['PATCH', 'PATCH'], ['DELETE', 'DELETE']], ep.method)) +
         fld('URL（支持 {{page}} {{date}} {{timestamp}} {{env:NAME}}）', inputHtml('ep_url_' + ep.id, ep.url)) +
         fld('记录路径（数组位置）', inputHtml('ep_path_' + ep.id, ep.records_path || '', 'placeholder="data.list"')) +
+        fld('写入表 / 文件名（留空 = 用任务的）', inputHtml('ep_table_' + ep.id, (ep.sink && ep.sink.table) || '', 'placeholder="例如 products；文件类是文件名"')) +
         '</div>' +
+        '<details class="ep-sample" id="ep_reqbox_' + esc(ep.id) + '"><summary>请求头 / 请求体（可改）' +
+        ((ep.headers && Object.keys(ep.headers).length) ? ' · 请求头 ' + Object.keys(ep.headers).length + ' 项' : '') +
+        (ep.body ? ' · 请求体 ' + esc(fmtBytes(String(ep.body).length)) : '') +
+        '</summary>' +
+        '<div class="form-grid" style="margin-top:8px">' +
+        fld('请求头（一行一个 Name: Value，可改）', textareaHtml('ep_headers_' + ep.id, headersToText(ep.headers), 3),
+          'Cookie / User-Agent / Referer 由「会话」提供，不用写；值里可用 {{env:NAME}}') +
+        fld('请求体（原样发送，可改）', textareaHtml('ep_body_' + ep.id, ep.body || '', 3),
+          '支持 {{page}} {{date}} {{env:NAME}}；分页用「请求体 JSON」时会自动改写翻页字段') +
+        '</div>' +
+        '</details>' +
         '<div class="ep-pager">' +
         '<div class="ep-pager-head"><b>分页</b><span class="muted" id="ep_phint_' + esc(ep.id) + '">' + esc(describePag(pg)) + '</span>' +
         '<button class="btn btn--sm" data-ep-detect="' + esc(ep.id) + '">自动识别分页</button></div>' +
         '<div class="form-grid">' +
         fld('翻页方式', selectHtml('ep_pmode_' + ep.id, [['auto', '自动（推荐）'], ['page', '页码 page=1,2,3'], ['offset', '偏移 offset=0,20,40'], ['cursor', '游标 cursor=xxx'], ['none', '不分页（只抓一次）']], pg.mode)) +
         fld('参数名', inputHtml('ep_pparam_' + ep.id, pg.param, 'placeholder="page / offset / cursor"')) +
-        fld('参数位置', selectHtml('ep_pin_' + ep.id, [['query', 'URL 参数'], ['body', '请求体 JSON']], pg.in)) +
+        fld('参数位置', selectHtml('ep_pin_' + ep.id, [['auto', '自动（POST 进请求体，GET 进 URL）'], ['query', 'URL 参数'], ['body', '请求体 JSON']], pg.in)) +
         fld('每页条数', numHtml('ep_psize_' + ep.id, pg.page_size, 'min="0" placeholder="自动"')) +
+        fld('条数参数名（可空）', inputHtml('ep_psizeparam_' + ep.id, pg.size_param, 'placeholder="size / limit / pageSize"'),
+          '填了就把「每页条数」一起发给接口，和页码参数同进 query 或 body') +
         fld('最多页数', numHtml('ep_pmax_' + ep.id, pg.max_pages, 'min="1" max="2000"'),
           '填了就以你填的为准（硬顶 2000）；留空则用任务的「分页默认上限」') +
         fld('起始值', numHtml('ep_pstart_' + ep.id, pg.start, 'min="0"')) +
@@ -1204,9 +1892,52 @@
         '<label class="check-line" style="margin-top:6px"><input type="checkbox" data-ep-short="' + esc(ep.id) + '"' +
         (pg.stop_on_short ? ' checked' : '') + '> 短页即止（返回条数 &lt; 每页条数时视为最后一页）</label>' +
         '</div>' +
-        '<div class="field"><label>字段映射（列名 ← 响应路径）</label><div class="chips">' + fields + '</div></div>' +
+        '<details class="ep-sample"><summary>字段映射（' + (ep.fields || []).length + ' 个字段 ← 响应路径）</summary>' +
+        '<div class="chips" style="margin:6px 0 2px">' + fields + '</div>' +
+        '<div class="muted">要增删改字段点上面的「字段映射」按钮（从样本重新识别也在那儿）</div>' +
+        '</details>' +
+        '<details class="ep-sample"><summary>录制时的请求数据' +
+        (ep.sample_at ? '（' + esc(ep.sample_at) + '）' : '') + ' · 点开看' +
+        '</summary>' +
+        sampleHtml(ep) +
+        '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<button class="btn btn--sm" data-ep-fill="' + esc(ep.id) + '" data-fill="headers">填入请求头</button>' +
+        '<button class="btn btn--sm" data-ep-fill="' + esc(ep.id) + '" data-fill="body">填入请求体</button>' +
+        '<button class="btn btn--sm" data-ep-fill="' + esc(ep.id) + '" data-fill="all">全部填入</button>' +
+        '<span class="muted">填进上面可编辑的输入框，改完点「保存配置」才生效</span>' +
+        '</div>' +
+        '</details>' +
         '</div>' +
         '</div>';
+    }
+
+    /** 录制快照（请求侧）：请求头 / 请求体 / 来源页面（明文，含 Cookie / Authorization） */
+    function sampleHtml(ep) {
+      var parts = [];
+      var meta = [];
+      if (ep.sample_page_url) meta.push('页面 ' + ep.sample_page_url);
+      if (ep.created_from) meta.push('录制请求 id ' + ep.created_from);
+      if (meta.length) {
+        parts.push('<div class="muted" style="margin:2px 0 8px">' + esc(meta.join('　·　')) + '</div>');
+      }
+
+      var hk = ep.sample_headers ? Object.keys(ep.sample_headers) : [];
+      if (hk.length) {
+        parts.push('<div class="field"><label>请求头（录制时原样，明文）</label>' +
+          '<div class="table-wrap"><table class="table table--fields"><tbody>' +
+          hk.map(function (k) {
+            return '<tr><td class="mono" style="width:30%">' + esc(k) + '</td><td class="mono">' + esc(ep.sample_headers[k]) + '</td></tr>';
+          }).join('') +
+          '</tbody></table></div></div>');
+      }
+      if (ep.sample_req_body) {
+        parts.push('<div class="field"><label>请求体（录制时）</label>' +
+          '<pre class="diagnose-out" style="max-height:260px">' + esc(ep.sample_req_body) + '</pre></div>');
+      }
+      if (!parts.length) {
+        return '<div class="muted">这条接口没有录制快照（手工添加的接口，或老版本建的任务）。重录一遍接口就能带上。</div>';
+      }
+      return parts.join('');
     }
 
     function openFieldsModal(eid) {
@@ -1285,8 +2016,12 @@
         return {
           id: ep.id,
           name: (val(root, 'ep_name_' + ep.id) || ep.name || '').trim() || ep.name,
-          sample_status: ep.sample_status || 0,
           sample_body: ep.sample_body || '',
+          // 录制快照：保存时必须原样带上，否则一改配置就把"录制时看到的报文"抹掉了
+          sample_headers: ep.sample_headers || null,
+          sample_req_body: ep.sample_req_body || '',
+          sample_page_url: ep.sample_page_url || '',
+          sample_at: ep.sample_at || '',
           created_from: ep.created_from || '',
           method: val(root, 'ep_method_' + ep.id) || ep.method || 'GET',
           url: (val(root, 'ep_url_' + ep.id) || ep.url || '').trim(),
@@ -1294,9 +2029,10 @@
           pagination: {
             mode: val(root, 'ep_pmode_' + ep.id) || 'none',
             param: val(root, 'ep_pparam_' + ep.id).trim(),
-            in: val(root, 'ep_pin_' + ep.id) || 'query',
+            in: val(root, 'ep_pin_' + ep.id) || 'auto',
             start: numVal(root, 'ep_pstart_' + ep.id, 0),
             page_size: numVal(root, 'ep_psize_' + ep.id, 0),
+            size_param: val(root, 'ep_psizeparam_' + ep.id).trim(),
             max_pages: numVal(root, 'ep_pmax_' + ep.id, 0),
             total_path: val(root, 'ep_ptotal_' + ep.id).trim(),
             has_more_path: val(root, 'ep_pmore_' + ep.id).trim(),
@@ -1304,11 +2040,21 @@
             stop_on_short: !!(ep.pagination && ep.pagination.stop_on_short !== false)
           },
           enabled: ep.enabled !== false,
-          headers: ep.headers || null,
-          body: ep.body || '',
-          fields: ep.fields || []
+          headers: textToHeaders(val(root, 'ep_headers_' + ep.id)),
+          body: (function () {
+            var el = root.querySelector('#ep_body_' + ep.id);
+            return el ? el.value : (ep.body || '');
+          })(),
+          fields: ep.fields || [],
+          sink: epSinkValue(ep.id)
         };
       });
+    }
+
+    /** 接口级落库覆盖：只填表名（其余沿用任务配置）；留空 = 用任务的 */
+    function epSinkValue(eid) {
+      var table = (val(root, 'ep_table_' + eid) || '').trim();
+      return table ? { table: table } : null;
     }
 
     // 用存下来的样本响应体重新识别分页（不写库、不发请求）
@@ -1325,8 +2071,138 @@
         }).catch(function () { });
     }
 
+    /** 自检：登录 → 导出会话 → 真发一次请求，逐步看断在哪 */
+    function selftest() {
+      var withLogin = !!(state.task && state.task.prelogin && state.task.prelogin.enabled);
+      U().openModal({
+        title: '自检中…',
+        width: 780,
+        body: '<div class="muted">' + (withLogin ? '先跑一遍前置登录（会开浏览器，可能要十几秒）' : '用当前浏览器登录态') +
+          '，然后导出会话、真发一次请求…</div>',
+        footer: '<button class="btn" data-modal-close>关闭</button>'
+      });
+      api('POST', '/api/collect/tasks/' + encodeURIComponent(state.id) + '/selftest', { run_prelogin: withLogin })
+        .then(function (rep) {
+          var steps = (rep && rep.steps) || [];
+          var body = '<div class="muted" style="margin-bottom:10px">' +
+            (rep && rep.ok ? '✔ 全链路通过' : '✘ 有步骤没通过（看下面标红的那条）') + '</div>' +
+            steps.map(function (st) {
+              return '<div class="ds-block" style="border-left:3px solid ' + (st.ok ? 'var(--green)' : 'var(--red)') + '">' +
+                '<div class="ds-block-title"><span>' + (st.ok ? '✔ ' : '✘ ') + esc(st.title) + '</span></div>' +
+                '<div class="mono" style="font-size:12px;line-height:1.7;word-break:break-all;white-space:pre-wrap">' +
+                esc(st.detail) + '</div></div>';
+            }).join('');
+          U().openModal({
+            title: '自检结果',
+            width: 780,
+            body: body || '<div class="muted">没有结果</div>',
+            footer: '<button class="btn" data-modal-close>关闭</button>'
+          });
+        }).catch(function () { });
+    }
+
+    /** 只试抓一个接口（先保存，服务端读的是保存后的配置），不写库 */
+    function previewEndpoint(epId) {
+      toast('正在保存配置并试抓这个接口…', 'info');
+      save().then(function (task) {
+        if (!task) return;
+        api('POST', '/api/collect/tasks/' + encodeURIComponent(state.id) + '/preview',
+          { limit: 5, endpoint_id: epId })
+          .then(function (res) { showPreviewModal(U().apiItems(res)); }).catch(function () { });
+      });
+    }
+
+    /** 把这个接口的分页配置套到所有接口（只改表单，点「保存配置」才生效） */
+    function applyPagToAll(epId) {
+      var eps = (state.task && state.task.endpoints) || [];
+      if (eps.length < 2) { toast('只有一个接口，不用套用', 'info'); return; }
+      var keys = ['pmode', 'pparam', 'pin', 'psize', 'psizeparam', 'pmax', 'pstart', 'ptotal', 'pmore', 'pnext'];
+      var src = {};
+      keys.forEach(function (k) {
+        var el = root.querySelector('#ep_' + k + '_' + epId);
+        src[k] = el ? el.value : '';
+      });
+      var srcShortEl = root.querySelector('[data-ep-short="' + epId + '"]');
+      var shortOn = !!(srcShortEl && srcShortEl.checked);
+      var modeText = (root.querySelector('#ep_pmode_' + epId) || {}).value || 'none';
+      U().confirmDialog({
+        title: '分页配置套用全部',
+        message: '把这个接口的分页配置（翻页方式 ' + modeText + '）复制到其余 ' + (eps.length - 1) + ' 个接口？\n只改表单，点「保存配置」才生效。',
+        confirmText: '套用'
+      }).then(function (ok) {
+        if (!ok) return;
+        var n = 0;
+        eps.forEach(function (ep) {
+          if (ep.id === epId) return;
+          keys.forEach(function (k) {
+            var el = root.querySelector('#ep_' + k + '_' + ep.id);
+            if (el) el.value = src[k];
+          });
+          var sh = root.querySelector('[data-ep-short="' + ep.id + '"]');
+          if (sh) sh.checked = shortOn;
+          n++;
+        });
+        toast('分页配置已套用到 ' + n + ' 个接口，记得点「保存配置」', 'success');
+      });
+    }
+
+    /** 把这个接口的请求头套到所有接口 */
+    function applyHeadersToAll(epId) {
+      var eps = (state.task && state.task.endpoints) || [];
+      if (eps.length < 2) { toast('只有一个接口，不用套用', 'info'); return; }
+      var srcEl = root.querySelector('#ep_headers_' + epId);
+      var text = srcEl ? srcEl.value : '';
+      if (!String(text).trim()) { toast('这个接口的请求头是空的', 'error'); return; }
+      U().confirmDialog({
+        title: '请求头套用全部',
+        message: '把这个接口的请求头复制到其余 ' + (eps.length - 1) + ' 个接口？\n只改表单，点「保存配置」才生效。',
+        confirmText: '套用'
+      }).then(function (ok) {
+        if (!ok) return;
+        var n = 0;
+        eps.forEach(function (ep) {
+          if (ep.id === epId) return;
+          var el = root.querySelector('#ep_headers_' + ep.id);
+          if (el) { el.value = text; n++; }
+        });
+        toast('请求头已复制到 ' + n + ' 个接口，记得点「保存配置」', 'success');
+      });
+    }
+
+    /** 现在跑一遍前置登录：先保存配置（服务端读的是保存后的任务），再执行登录流程并导出会话 */
+    function runPrelogin() {
+      var hint = root.querySelector('#pl_result');
+      if (hint) hint.textContent = '正在保存配置…';
+      save().then(function (task) {
+        // 保存会重绘这块表单，元素要重新取
+        var out = root.querySelector('#pl_result');
+        if (!task) { if (out) out.textContent = '保存失败，先修配置'; return; }
+        if (!task.prelogin || !task.prelogin.enabled) {
+          if (out) out.textContent = '前置登录没打开（勾上开关并选好录制）';
+          return;
+        }
+        if (out) out.textContent = '正在执行登录流程…';
+        api('POST', '/api/collect/tasks/' + encodeURIComponent(state.id) + '/prelogin', {})
+          .then(function (res) {
+            var ok = !!res.ok;
+            toast(ok ? '登录流程执行完成' : ('登录失败：' + (res.error || '未知错误')), ok ? 'success' : 'error');
+            out = root.querySelector('#pl_result');
+            if (!out) return;
+            var bits = [];
+            bits.push((ok ? '✔ 登录 ' : '✘ 登录 ') + (res.elapsed_ms || 0) + ' ms');
+            if (typeof res.cookie_count === 'number') bits.push('Cookie ' + res.cookie_count + ' 个');
+            if (res.session_error) bits.push('会话导出失败：' + res.session_error);
+            if (res.warning) bits.push('⚠ ' + res.warning);
+            if (res.error) bits.push(res.error);
+            if (res.run_id) bits.push('运行记录 ' + res.run_id);
+            out.textContent = bits.join(' · ');
+          }).catch(function () { });
+      });
+    }
+
     function save() {
       var cfg = readConfigForm(root, 'tk');
+      var splitEl = root.querySelector('#tk_split');
       var payload = {
         name: val(root, 'tk_name').trim(),
         description: val(root, 'tk_desc'),
@@ -1335,15 +2211,18 @@
         schedule: cfg.schedule,
         throttle: cfg.throttle,
         sink: cfg.sink,
-        session: cfg.session
+        session: cfg.session,
+        prelogin: cfg.prelogin,
+        common: cfg.common,
+        split_by_endpoint: !!(splitEl && splitEl.checked),
+        sink_profile_id: val(root, 'tk_profile')
       };
-      api('PATCH', '/api/collect/tasks/' + encodeURIComponent(state.id), payload).then(function (task) {
+      return api('PATCH', '/api/collect/tasks/' + encodeURIComponent(state.id), payload).then(function (task) {
         toast('已保存', 'success');
         state.task = task;
         paint(task);
-        loadRuns();
-        loadFiles(task);
-      }).catch(function () { });
+        return task;
+      }).catch(function () { return null; });
     }
 
     function loadRuns() {
@@ -1351,7 +2230,11 @@
       api('GET', '/api/collect/runs?task_id=' + encodeURIComponent(state.id) + '&limit=20', undefined, { silent: true })
         .then(function (res) {
           var items = U().apiItems(res);
-          if (!items.length) { host.innerHTML = ''; return; }
+          if (!items.length) {
+            host.innerHTML = '<div class="card"><div class="card-head"><h2>最近运行</h2></div>' +
+              '<div class="card-body muted">还没有运行记录，点右上「立即运行」跑一次。</div></div>';
+            return;
+          }
           host.innerHTML = '<div class="card"><div class="card-head"><h2>最近运行</h2></div><div class="card-body">' +
             '<div class="table-wrap"><table class="table"><thead><tr><th>开始时间</th><th>触发</th><th>结果</th>' +
             '<th class="num">请求</th><th class="num">解析</th><th class="num">写入</th><th class="actions-cell">操作</th></tr></thead><tbody>' +
@@ -1370,6 +2253,7 @@
     // 接口块：勾选 / 改名只改内存状态，保存时统一提交
     root.addEventListener('change', function (e) {
       var t = e.target;
+      if (t && t.id === 'tk_profile') { applyProfile(t.value); return; }
       var eid = t && t.getAttribute && t.getAttribute('data-ep-enabled');
       if (eid) { var ep = findEp(eid); if (ep) ep.enabled = t.checked; return; }
       var sid = t && t.getAttribute && t.getAttribute('data-ep-short');
@@ -1411,15 +2295,23 @@
         }
         return;
       }
+      var fillEl = t.closest('[data-ep-fill]');
+      if (fillEl) { fillSample(fillEl.getAttribute('data-ep-fill'), fillEl.getAttribute('data-fill')); return; }
       var fEl = t.closest('[data-ep-fields]');
       if (fEl) { openFieldsModal(fEl.getAttribute('data-ep-fields')); return; }
       var dEl = t.closest('[data-ep-detect]');
       if (dEl) { detectPagination(dEl.getAttribute('data-ep-detect')); return; }
+      var pgAll = t.closest('[data-ep-pgall]');
+      if (pgAll) { applyPagToAll(pgAll.getAttribute('data-ep-pgall')); return; }
+      var pvEl = t.closest('[data-ep-preview]');
+      if (pvEl) { previewEndpoint(pvEl.getAttribute('data-ep-preview')); return; }
+      var hdrAll = t.closest('[data-ep-hdrall]');
+      if (hdrAll) { applyHeadersToAll(hdrAll.getAttribute('data-ep-hdrall')); return; }
       var actEl = t.closest('[data-act]');
       var act = actEl ? actEl.getAttribute('data-act') : '';
       if (act === 'save') { save(); return; }
       if (t.closest('[data-files-refresh]')) { loadFiles(state.task); return; }
-      if (act === 'back') { go('#/collect'); return; }
+      if (act === 'back') { go('#/collect/tasks'); return; }
       if (act === 'refresh') { load(); return; }
       if (act === 'run') { runTask(state.id); return; }
       if (act === 'del') { deleteTask(state.id, null); return; }
@@ -1428,6 +2320,8 @@
           .then(function (res) { toast(res.message || '落库目标可用', 'success'); }).catch(function () { });
         return;
       }
+      if (act === 'selftest') { selftest(); return; }
+      if (act === 'run-prelogin') { runPrelogin(); return; }
       if (act === 'preview') {
         toast('正在试抓（不写库）…', 'info');
         api('POST', '/api/collect/tasks/' + encodeURIComponent(state.id) + '/preview', { limit: 5 })
@@ -1441,23 +2335,153 @@
     load();
   }
 
-  function showPreviewModal(items) {
-    var body = items.map(function (p) {
-      var html = '<div class="ds-block"><div class="ds-block-title">' + esc(p.name || p.endpoint_id || '接口') + ' ' +
-        statusChip(p.status) + '</div>' +
-        '<div class="muted" style="margin-bottom:6px">' + esc(p.url || '') + '</div>';
-      if (p.error) {
-        html += '<div class="alert alert--warn">' + esc(p.error) + (p.hint ? '<br>' + esc(p.hint) : '') + '</div>';
-      } else {
-        html += '<div class="muted" style="margin-bottom:4px">分页：' + esc(p.pagination || '不分页') +
-          (p.total ? ' · 响应 total=' + esc(p.total) + '，预计 ' + esc(p.estimated_pages || '?') + ' 页' : '') + '</div>' +
-          '<div class="muted" style="margin-bottom:6px">记录路径 <code>' + esc(p.records_path || '(响应本身)') +
-          '</code> · 本页 ' + esc(p.records || 0) + ' 条 · 列 ' + esc((p.columns || []).join(', ')) + '</div>' +
-          tablePreviewHtml(p.rows || []);
+  // 试抓详情里的「key: value」表（请求头 / query / 变量通用）
+  function pvKVHtml(obj, empty) {
+    var keys = Object.keys(obj || {}).sort();
+    if (!keys.length) return '<div class="muted">' + esc(empty || '（无）') + '</div>';
+    return '<div class="table-wrap"><table class="pv-kv"><tbody>' + keys.map(function (k) {
+      return '<tr><th>' + esc(k) + '</th><td>' + esc(obj[k]) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+  }
+
+  function pvDetailsHtml(title, inner) {
+    return '<details class="pv-details"><summary>' + esc(title) + '</summary>' +
+      '<div class="pv-details-body">' + inner + '</div></details>';
+  }
+
+  function pvPre(text) {
+    return '<pre class="pv-pre">' + esc(text || '') + '</pre>';
+  }
+
+  function renderPreviewItem(p) {
+    var req = p.request || {};
+    var resp = p.response || {};
+    var html = '<div class="ds-block">' +
+      '<div class="ds-block-title"><span>' + esc(p.name || p.endpoint_id || '接口') + '</span>' +
+      '<span class="op-group">' + statusChip(p.status) +
+      (req.duration_ms || req.duration_ms === 0 ? '<span class="muted">' + esc(fmtMS(req.duration_ms)) + '</span>' : '') +
+      (resp.size ? '<span class="muted">' + esc(fmtBytes(resp.size)) + '</span>' : '') +
+      '</span></div>' +
+      '<div class="pv-url">' + methodChip(req.method || 'GET') + ' ' + esc(p.url || req.url || '') + '</div>';
+
+    if (p.session) html += '<div class="muted" style="margin-top:4px">登录态：' + esc(p.session) + '</div>';
+    if (p.warning) html += '<div class="alert alert--warn" style="margin:6px 0">' + esc(p.warning) + '</div>';
+    if (p.error) {
+      html += '<div class="alert alert--warn" style="margin:6px 0">' + esc(p.error) +
+        (p.hint ? '<br>' + esc(p.hint) : '') + '</div>';
+    }
+
+    if ((p.process || []).length) {
+      html += '<div class="pv-section"><div class="pv-section-title">抓取过程</div><ol class="pv-steps">' +
+        p.process.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
+    }
+
+    var reqInner = '';
+    if (req.query_params && Object.keys(req.query_params).length) {
+      reqInner += '<div class="pv-sub-title">Query / 表单参数' +
+        (req.retries ? ' · 重试 ' + esc(req.retries) + ' 次' : '') + '</div>' + pvKVHtml(req.query_params);
+    }
+    if (req.vars && Object.keys(req.vars).length) {
+      reqInner += '<div class="pv-sub-title">展开后的变量</div>' + pvKVHtml(req.vars);
+    }
+    reqInner += '<div class="pv-sub-title">请求头（Cookie / Authorization 已打码）</div>' +
+      pvKVHtml(req.headers, '（没有请求头）');
+    if (req.body) reqInner += '<div class="pv-sub-title">请求体</div>' + pvPre(req.body);
+    if (!reqInner) reqInner = '<div class="muted">没有记录到请求报文</div>';
+    html += pvDetailsHtml('请求参数（' + (req.method || 'GET') + (req.body ? ' · 含请求体' : '') + '）', reqInner);
+
+    var respInner = '<div class="pv-kv-line">' +
+      '<span>状态 <b>' + esc(resp.status || 0) + (resp.status_text ? ' ' + esc(resp.status_text) : '') + '</b></span>' +
+      '<span>大小 <b>' + esc(fmtBytes(resp.size)) + '</b></span>' +
+      '<span>耗时 <b>' + esc(fmtMS(req.duration_ms)) + '</b></span>' +
+      (resp.content_type ? '<span>类型 <b class="mono">' + esc(resp.content_type) + '</b></span>' : '') +
+      '</div>' +
+      '<div class="pv-sub-title">响应头（Set-Cookie 已打码）</div>' + pvKVHtml(resp.headers, '（没有响应头）');
+    if (resp.body_preview) {
+      respInner += '<div class="pv-sub-title">响应体预览（前 2000 字节，敏感字段已打码）</div>' + pvPre(resp.body_preview);
+    }
+    html += pvDetailsHtml('响应报文', respInner);
+
+    if (!p.error) {
+      html += '<div class="pv-section"><div class="pv-section-title">解析结果</div>' +
+        '<div class="muted">分页：' + esc(p.pagination || '不分页') +
+        (p.total ? ' · 响应 total=' + esc(p.total) + '，预计 ' + esc(p.estimated_pages || '?') + ' 页' : '') + '</div>' +
+        '<div class="muted">记录路径 <code>' + esc(p.records_path || '(响应本身)') + '</code> · 本页 ' +
+        esc(p.records || 0) + ' 条 · 列 ' + esc((p.columns || []).join(', ')) + '</div>' +
+        (p.hint ? '<div class="alert alert--warn" style="margin-top:6px">' + esc(p.hint) + '</div>' : '') +
+        tablePreviewHtml(p.rows || []) + '</div>';
+    }
+    return html + '</div>';
+  }
+
+  // 复制用的纯文本明细（含完整请求/响应，敏感值已由后端打码）
+  function previewPlainText(items) {
+    var lines = [];
+    items.forEach(function (p) {
+      var req = p.request || {};
+      var resp = p.response || {};
+      lines.push('===== ' + (p.name || p.endpoint_id || '接口') + ' =====');
+      if (p.session) lines.push('登录态: ' + p.session);
+      if (p.warning) lines.push('[提示] ' + p.warning);
+      if (p.error) lines.push('[错误] ' + p.error + (p.hint ? ' / ' + p.hint : ''));
+      (p.process || []).forEach(function (s, i) { lines.push((i + 1) + '. ' + s); });
+      lines.push('请求: ' + (req.method || 'GET') + ' ' + (p.url || req.url || ''));
+      if (req.headers) {
+        lines.push('请求头:');
+        Object.keys(req.headers).sort().forEach(function (k) { lines.push('  ' + k + ': ' + req.headers[k]); });
       }
-      return html + '</div>';
-    }).join('');
-    U().openModal({ title: '试抓预览（不会写入数据库）', width: 900, body: body || '<div class="muted">没有结果</div>' });
+      if (req.body) lines.push('请求体: ' + req.body);
+      lines.push('响应: ' + (resp.status || 0) + (resp.status_text ? ' ' + resp.status_text : '') +
+        ' · ' + (resp.size || 0) + ' 字节');
+      if (resp.headers) {
+        lines.push('响应头:');
+        Object.keys(resp.headers).sort().forEach(function (k) { lines.push('  ' + k + ': ' + resp.headers[k]); });
+      }
+      if (resp.body_preview) lines.push('响应体预览: ' + resp.body_preview);
+      lines.push('');
+    });
+    return lines.join('\n');
+  }
+
+  function copyPreview(items) {
+    var text = previewPlainText(items || []);
+    var done = function () { toast('试抓明细已复制', 'success'); };
+    var fallback = function () {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，请手动选择文本', 'error'); }
+      if (ta.parentNode) ta.parentNode.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+      return;
+    }
+    fallback();
+  }
+
+  function showPreviewModal(items) {
+    items = items || [];
+    var intro = items.length
+      ? '<div class="muted" style="margin-bottom:10px">下面是本次试抓实际发出去的请求与收到的响应（Cookie / Authorization / password 已打码，可直接复制给同事）。</div>'
+      : '';
+    var body = intro + (items.map(renderPreviewItem).join('') || '<div class="muted">没有结果</div>');
+    var m = U().openModal({
+      title: '试抓预览（不会写入数据库）',
+      width: 1100,
+      body: body,
+      footer: '<button class="btn" data-modal-close>关闭</button>' +
+        '<button class="btn btn--primary" data-copy-preview>复制完整明细</button>'
+    });
+    if (m && m.overlay) {
+      m.overlay.addEventListener('click', function (e) {
+        var t = e.target && e.target.nodeType === 1 ? e.target : null;
+        if (t && t.closest('[data-copy-preview]')) copyPreview(items);
+      });
+    }
   }
 
   /* ======================================================================
@@ -1466,15 +2490,24 @@
 
   function renderRun(app, id) {
     var root = pageRoot(app);
-    var state = { id: id, run: null, es: null, timer: null };
+    var state = { id: id, run: null, es: null, timer: null, logs: [], httpOnly: false, sqlOnly: false };
 
-    root.innerHTML = headHtml('采集运行', '抓了多少、写了多少、哪一步出错，都在这里。',
-      '<button class="btn btn--sm" data-act="back">返回任务</button>' +
+    root.innerHTML = headHtml('执行日志 · 详情',
+      '每次请求与响应都记在下面的日志里（明文，Cookie / Authorization 原样显示）；分页抓多页就有多组，方便确认参数与会话是否真的生效。',
+      '<button class="btn btn--sm" data-act="back">返回执行日志</button>' +
+      '<button class="btn btn--sm" data-act="back-task">回到任务</button>' +
       '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
       '<button class="btn btn--sm btn--danger" data-act="cancel">取消运行</button>') +
       '<div id="run-body">' + U().loadingCard('加载运行…') + '</div>' +
-      '<div class="card" style="margin-top:16px"><div class="card-head"><h2>实时日志</h2></div>' +
-      '<div class="card-body"><div class="logs" id="run-logs" style="max-height:360px;overflow:auto"></div></div></div>';
+      '<div class="card" style="margin-top:16px">' +
+      '<div class="card-head"><h2>运行日志</h2>' +
+      '<div class="card-tools">' +
+      '<button class="btn btn--sm" data-act="log-toggle-parts">展开报文</button>' +
+      '<label class="check-line"><input type="checkbox" id="log-http-only"> 只看请求/响应</label>' +
+      '<label class="check-line"><input type="checkbox" id="log-sql-only"> 只看 SQL</label>' +
+      '<span class="muted" id="log-count"></span>' +
+      '</div></div>' +
+      '<div class="card-body" style="padding:0"><div class="logs logs--panel" id="run-logs" style="max-height:520px;overflow:auto"></div></div></div>';
 
     function paint(run) {
       state.run = run;
@@ -1495,7 +2528,7 @@
         (eps.length ? '<div class="table-wrap"><table class="table"><thead><tr>' +
           '<th>接口</th><th style="width:70px">方法</th><th>URL</th><th style="width:64px">状态</th>' +
           '<th class="num">页数</th><th class="num">解析</th><th class="num">写入</th>' +
-          '<th class="num">耗时</th><th>问题</th></tr></thead><tbody>' +
+          '<th class="num">耗时</th><th>写入目标</th><th>问题</th></tr></thead><tbody>' +
           eps.map(function (e) {
             return '<tr><td>' + esc(e.name || e.endpoint_id) + '</td>' +
               '<td>' + methodChip(e.method) + '</td>' +
@@ -1507,25 +2540,187 @@
               '<td class="num">' + esc(e.written || 0) +
               (e.duplicates ? '<div class="cell-sub">去重 -' + esc(e.duplicates) + '</div>' : '') + '</td>' +
               '<td class="num">' + esc(fmtMS(e.duration_ms)) + '</td>' +
+              '<td class="muted">' + esc(e.target || '—') + '</td>' +
               '<td class="cell-state' + (e.error ? ' cell-state--error' : '') + '">' +
               (e.error ? esc(e.error) + (e.hint ? '<div class="cell-sub">' + esc(e.hint) + '</div>' : '')
                 : (e.stop_reason ? '<span class="muted">' + esc(e.stop_reason) + '</span>' : '<span class="muted">—</span>')) +
-              '</td></tr>';
+              '</td>' +
+              '</tr>';
           }).join('') + '</tbody></table></div>' : '<div class="muted">还没有接口结果</div>') +
         '</div></div>';
-      paintLogs(run.logs || []);
+      state.logs = (run.logs || []).slice();
+      paintLogs();
     }
 
-    function paintLogs(logs) {
+    function logVisible(l) {
+      var cls = levelClass(l.level);
+      if (state.httpOnly && !state.sqlOnly) return cls === 'http';
+      if (state.sqlOnly && !state.httpOnly) return cls === 'sql';
+      if (state.sqlOnly && state.httpOnly) return cls === 'sql' || cls === 'http';
+      return true;
+    }
+
+    function logLineHtml(l) {
+      var cls = levelClass(l.level);
+      var ts = '<span class="log-ts">' + esc(clock(l.ts)) + '</span>';
+      var lv = '<span class="log-lv">' + esc((l.level || 'info').toUpperCase()) + '</span>';
+      if (cls === 'http') {
+        // 报文单独排版：一行一个请求头、报文体折叠，长 JWT / 大 JSON 不再糊成一团
+        return '<div class="logline logline--http">' + ts + lv +
+          '<div class="log-msg">' + httpLineHtml(l.message) + '</div></div>';
+      }
+      return '<div class="logline logline--' + cls + '">' + ts + lv +
+        '<span class="log-msg">' + esc(l.message) + '</span></div>';
+    }
+
+    /** HTTP 报文行：首行方法/URL（或状态码），请求头逐项列出，请求体 / 响应体折叠 */
+    function httpLineHtml(message) {
+      var msg = String(message || '');
+      var nl = msg.indexOf('\n');
+      var head = nl >= 0 ? msg.slice(0, nl) : msg;
+      var rest = nl >= 0 ? msg.slice(nl + 1) : '';
+
+      if (head.charAt(0) === '→') {
+        var m = head.slice(1).match(/^\s*(\S+)\s*([\s\S]*)$/) || [];
+        var method = m[1] || '';
+        var tail = (m[2] || '').trim();
+        var seq = '';
+        var si = tail.lastIndexOf('　#');
+        if (si >= 0) { seq = tail.slice(si + 1); tail = tail.slice(0, si); }
+        return '<div class="http-head">' +
+          '<span class="http-arrow">→</span>' +
+          '<span class="http-method">' + esc(method) + '</span>' +
+          '<span class="http-url">' + esc(tail) + '</span>' +
+          (seq ? '<span class="http-seq">' + esc(seq) + '</span>' : '') +
+          '</div>' + httpPartsHtml(rest);
+      }
+
+      if (head.charAt(0) === '←') {
+        var r = head.slice(1).match(/^\s*(\d+)[\s　]*([\s\S]*)$/) || [];
+        var status = r[1] || '';
+        var code = parseInt(status, 10) || 0;
+        var tone = code >= 200 && code < 300 ? 'is-ok'
+          : (code >= 500 ? 'is-err' : (code >= 400 ? 'is-warn' : ''));
+        return '<div class="http-head">' +
+          '<span class="http-arrow">←</span>' +
+          '<span class="http-status ' + tone + '">' + esc(status) + '</span>' +
+          '<span class="http-size">' + esc((r[2] || '').trim()) + '</span>' +
+          '</div>' + (rest.trim() ? bodyDetails('响应体', rest.trim()) : '');
+      }
+
+      return '<div class="http-url">' + esc(head) + '</div>' +
+        (rest.trim() ? '<pre class="http-body">' + esc(rest.trim()) + '</pre>' : '');
+    }
+
+    /** 把「请求头 … / 请求体 …」拆成两块可折叠内容 */
+    function httpPartsHtml(rest) {
+      rest = rest || '';
+      var hIdx = rest.indexOf('请求头  ');
+      var bIdx = rest.indexOf('请求体  ');
+      if (hIdx < 0 && bIdx < 0) {
+        return rest.trim() ? '<pre class="http-body">' + esc(rest.trim()) + '</pre>' : '';
+      }
+      var out = '';
+      if (hIdx >= 0) {
+        var hEnd = bIdx > hIdx ? bIdx : rest.length;
+        out += headersDetails(rest.slice(hIdx + 5, hEnd).trim());
+      }
+      if (bIdx >= 0) {
+        var body = rest.slice(bIdx + 5).trim();
+        if (body) out += bodyDetails('请求体', body);
+      }
+      return out;
+    }
+
+    function headersDetails(raw) {
+      if (!raw) return '';
+      var items = raw.split(' | ');
+      var rows = [];
+      var hint = '';
+      items.forEach(function (it) {
+        var i = it.indexOf(': ');
+        var k = i > 0 ? it.slice(0, i) : it;
+        var v = i > 0 ? it.slice(i + 2) : '';
+        rows.push('<tr><td class="k">' + esc(k) + '</td><td class="v">' + esc(v) + '</td></tr>');
+        // 摘要里带一眼关键凭证：不用展开也能看出 Authorization/Cookie 带没带
+        if (!hint && /^(authorization|cookie|x-token|x-auth-token)$/i.test(k.trim())) {
+          var short = v.length > 42 ? v.slice(0, 42) + '…' : v;
+          hint = ' · ' + k.trim() + ': ' + short;
+        }
+      });
+      return '<details class="http-part"><summary>请求头（' + items.length + '）' + esc(hint) + '</summary>' +
+        '<table class="http-kv"><tbody>' + rows.join('') + '</tbody></table></details>';
+    }
+
+    function bodyDetails(label, text) {
+      return '<details class="http-part"><summary>' + esc(label) + '（' + esc(fmtBytes(utf8Len(text))) + '）</summary>' +
+        '<pre class="http-body">' + esc(prettyBody(text)) + '</pre></details>';
+    }
+
+    /** 看着像 JSON 就格式化（超过 20KB 跳过，避免拖慢渲染） */
+    function prettyBody(text) {
+      var s = String(text || '');
+      if (s.length > 20000) return s;
+      var t = s.trim();
+      if (t.charAt(0) !== '{' && t.charAt(0) !== '[') return s;
+      try { return JSON.stringify(JSON.parse(t), null, 2); } catch (e) { return s; }
+    }
+
+    function utf8Len(s) {
+      var n = 0;
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+        else n += 3;
+      }
+      return n;
+    }
+
+    function updateLogCount() {
+      var el = root.querySelector('#log-count');
+      if (!el) return;
+      var http = 0;
+      for (var i = 0; i < state.logs.length; i++) {
+        if (levelClass(state.logs[i].level) === 'http') http++;
+      }
+      el.textContent = '共 ' + state.logs.length + ' 行 · 请求/响应 ' + http + ' 行';
+    }
+
+    function paintLogs() {
       var host = root.querySelector('#run-logs');
       if (!host) return;
-      host.innerHTML = logs.map(function (l) {
-        return '<div class="logline logline--' + levelClass(l.level) + '">' +
-          '<span class="log-ts">' + esc(clock(l.ts)) + '</span>' +
-          '<span class="log-lv">' + esc((l.level || 'info').toUpperCase()) + '</span>' +
-          '<span class="log-msg">' + esc(l.message) + '</span></div>';
-      }).join('');
+      var list = state.logs.filter(logVisible);
+      host.innerHTML = list.length ? list.map(logLineHtml).join('')
+        : '<div style="padding:12px;color:#9fb0c7">' +
+        (state.httpOnly ? '还没有请求/响应日志'
+          : (state.sqlOnly ? '还没有 SQL 日志（落库选 Excel / JSON / JSONL 时不会产生 SQL）' : '暂无日志')) +
+        '</div>';
       host.scrollTop = host.scrollHeight;
+      updateLogCount();
+    }
+
+    function appendLog(l) {
+      state.logs.push(l);
+      var host = root.querySelector('#run-logs');
+      if (host && logVisible(l)) {
+        host.insertAdjacentHTML('beforeend', logLineHtml(l));
+        host.scrollTop = host.scrollHeight;
+      }
+      updateLogCount();
+    }
+
+    /** 一键展开 / 折叠所有报文块（请求头、请求体、响应体） */
+    function toggleParts() {
+      var host = root.querySelector('#run-logs');
+      if (!host) return;
+      var parts = Array.prototype.slice.call(host.querySelectorAll('.http-part'));
+      if (!parts.length) return;
+      var anyClosed = parts.some(function (d) { return !d.open; });
+      parts.forEach(function (d) { d.open = anyClosed; });
+      var btn = root.querySelector('[data-act="log-toggle-parts"]');
+      if (btn) btn.textContent = anyClosed ? '折叠报文' : '展开报文';
     }
 
     function clock(ts) {
@@ -1553,13 +2748,7 @@
         var data;
         try { data = JSON.parse(ev.data); } catch (e) { return; }
         if (data.type === 'log' && data.log) {
-          var host = root.querySelector('#run-logs');
-          if (!host) return;
-          host.insertAdjacentHTML('beforeend', '<div class="logline logline--' + levelClass(data.log.level) + '">' +
-            '<span class="log-ts">' + esc(clock(data.log.ts)) + '</span>' +
-            '<span class="log-lv">' + esc((data.log.level || 'info').toUpperCase()) + '</span>' +
-            '<span class="log-msg">' + esc(data.log.message) + '</span></div>');
-          host.scrollTop = host.scrollHeight;
+          appendLog(data.log);
         } else if (data.type === 'status' || data.type === 'end') {
           stopStream();
           api('GET', '/api/collect/runs/' + encodeURIComponent(state.id)).then(paint).catch(function () { });
@@ -1577,17 +2766,36 @@
       if (!t || !t.closest) return;
       var actEl = t.closest('[data-act]');
       var act = actEl ? actEl.getAttribute('data-act') : '';
-      if (act === 'back') {
+      if (act === 'back') { go('#/collect/runs'); return; }
+      if (act === 'back-task') {
         var tid = state.run && state.run.task_id;
-        go(tid ? '#/collect/task/' + encodeURIComponent(tid) : '#/collect');
+        if (tid) go('#/collect/task/' + encodeURIComponent(tid));
+        else toast('这次运行没有关联任务', 'error');
         return;
       }
+      if (act === 'log-toggle-parts') { toggleParts(); return; }
       if (act === 'refresh') { load(); return; }
       if (act === 'cancel') {
         api('POST', '/api/collect/runs/' + encodeURIComponent(state.id) + '/cancel', {})
           .then(function () { toast('已发送取消', 'success'); load(); }).catch(function () { });
       }
     });
+
+    // 日志过滤：只看请求/响应、只看 SQL（分页跑很多页时先把业务日志滤掉）
+    var httpBox = root.querySelector('#log-http-only');
+    if (httpBox) {
+      httpBox.addEventListener('change', function () {
+        state.httpOnly = !!httpBox.checked;
+        paintLogs();
+      });
+    }
+    var sqlBox = root.querySelector('#log-sql-only');
+    if (sqlBox) {
+      sqlBox.addEventListener('change', function () {
+        state.sqlOnly = !!sqlBox.checked;
+        paintLogs();
+      });
+    }
 
     load();
     // 轮询兜底：SSE 断掉时也能看到进度
@@ -1606,7 +2814,11 @@
   /* ------------------------------------------------------------ 对外 */
 
   window.UITestCollect = {
-    renderList: renderList,
+    renderCaptures: renderCaptures,
+    renderTasks: renderTasks,
+    renderFiles: renderFiles,
+    renderSinks: renderSinks,
+    renderRuns: renderRuns,
     renderCapture: renderCapture,
     renderTask: renderTask,
     renderRun: renderRun

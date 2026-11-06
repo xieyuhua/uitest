@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -49,6 +50,8 @@ type CaptureSession struct {
 	Deleted map[string]bool
 	// LastAt 最近一次收到数据的时间（插件会话长时间没动静就自动判为"已停止"，避免僵尸会话）
 	LastAt time.Time
+	// Types 这次录制要抓的资源类型（XHR / Fetch / Document …），列表和详情都会回显，便于确认设置生效
+	Types []string
 }
 
 // CaptureInfo 会话摘要（列表接口返回）。
@@ -61,7 +64,40 @@ type CaptureInfo struct {
 	Stopped   bool      `json:"stopped"`
 	Note      string    `json:"note,omitempty"`
 	UserAgent string    `json:"user_agent,omitempty"`
-	Types     string    `json:"types,omitempty"`
+	Types     []string  `json:"types,omitempty"`
+}
+
+// normalizeTypes 规范化资源类型（XHR / Fetch / Document …）：去空、去重、大小写统一。
+func normalizeTypes(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		v := strings.TrimSpace(t)
+		if v == "" {
+			continue
+		}
+		switch strings.ToLower(v) {
+		case "xhr":
+			v = "XHR"
+		case "fetch":
+			v = "Fetch"
+		case "document", "doc", "documentbody":
+			v = "Document"
+		default:
+			if len(v) > 1 {
+				v = strings.ToUpper(v[:1]) + strings.ToLower(v[1:])
+			}
+		}
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		out = []string{"XHR", "Fetch"}
+	}
+	return out
 }
 
 // maxCaptureEntries 单个会话最多保留多少条（防止长时间录制把内存吃满）。
@@ -74,6 +110,7 @@ func NewRecorder(br *browser.Manager) *Recorder {
 
 // Start 打开一个标签页并开始录制它的网络请求。
 func (r *Recorder) Start(ctx context.Context, startURL string, types []string, captureBodies bool, note string) (CaptureInfo, error) {
+	types = normalizeTypes(types)
 	page, err := r.br.OpenPage(ctx, "about:blank")
 	if err != nil {
 		return CaptureInfo{}, fmt.Errorf("启动内置浏览器失败：%w", err)
@@ -96,7 +133,9 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 		StartedAt: time.Now(),
 		Note:      note,
 		Deleted:   map[string]bool{},
+		Types:     types,
 	}
+	log.Printf("[collect] 开始录制 %s：types=%v url=%s capture_bodies=%v", sess.ID, types, startURL, captureBodies)
 	// 记下这台浏览器的 UA：定时采集默认复用它（不伪造、不轮换）
 	uaCtx, uaCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if raw, e := page.Eval(uaCtx, "navigator.userAgent"); e == nil {
@@ -130,7 +169,7 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 	}
 	info := CaptureInfo{
 		ID: sess.ID, Source: sess.Source, PageURL: sess.PageURL, StartedAt: sess.StartedAt,
-		Note: sess.Note, UserAgent: sess.UserAgent, Types: fmt.Sprint(types),
+		Note: sess.Note, UserAgent: sess.UserAgent, Types: sess.Types,
 	}
 	r.mu.Unlock()
 	return info, nil
@@ -149,6 +188,8 @@ func (r *Recorder) StartExternal(pageURL, note, userAgent string) (CaptureInfo, 
 		UserAgent: userAgent,
 		Entries:   []model.CapturedRequest{},
 		Deleted:   map[string]bool{},
+		// 插件只会上报接口请求（XHR/Fetch），不会有页面文档
+		Types: []string{"XHR", "Fetch"},
 	}
 
 	r.mu.Lock()
@@ -325,6 +366,17 @@ func (r *Recorder) Get(id string) (*CaptureSession, bool) {
 	return s, ok
 }
 
+// SkippedTypes 这次录制"因为不在录制范围里"被跳过的请求，按类型统计（诊断"文档没录到"用）。
+func (r *Recorder) SkippedTypes(id string) map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok || s.Cap == nil {
+		return nil
+	}
+	return s.Cap.SkippedTypes()
+}
+
 // Entries 取当前录到的请求（运行中实时取，停止后取快照；已删除的条目不再返回）。
 func (r *Recorder) Entries(id string) ([]model.CapturedRequest, bool, error) {
 	r.mu.Lock()
@@ -455,7 +507,7 @@ func (r *Recorder) List() []CaptureInfo {
 		}
 		out = append(out, CaptureInfo{
 			ID: s.ID, Source: s.Source, PageURL: s.PageURL, StartedAt: s.StartedAt,
-			Count: count, Stopped: s.Stopped, Note: s.Note, UserAgent: s.UserAgent,
+			Count: count, Stopped: s.Stopped, Note: s.Note, UserAgent: s.UserAgent, Types: s.Types,
 		})
 	}
 	return out

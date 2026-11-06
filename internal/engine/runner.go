@@ -75,6 +75,72 @@ func (r *Runner) Cancel(runID string) error {
 	return nil
 }
 
+// RunSync 同步跑完一次已创建的运行（供「采集前置登录」这类需要等结果的场景）。
+func (r *Runner) RunSync(ctx context.Context, runID string) error {
+	cctx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.cancels[runID] = cancel
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.cancels, runID)
+		r.mu.Unlock()
+		cancel()
+	}()
+
+	r.execute(cctx, runID)
+	run, err := r.store.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	switch run.Status {
+	case "passed":
+		return nil
+	case "canceled":
+		return errors.New("已取消")
+	}
+	if strings.TrimSpace(run.Error) != "" {
+		return errors.New(run.Error)
+	}
+	return fmt.Errorf("运行状态 %s", run.Status)
+}
+
+// RunRecordingSync 按录制 id 新建一次运行并同步跑完，返回运行 id。
+// 采集任务的前置登录用它：跑完就能从内置浏览器导出最新会话。
+// dataset 用来填录制里的 {{变量}}（密码框录制时被脱敏成 {{password}}，必须靠它注入）。
+func (r *Runner) RunRecordingSync(ctx context.Context, recordingID, title string, dataset map[string]string) (string, error) {
+	rec, err := r.store.GetRecording(recordingID)
+	if err != nil {
+		return "", err
+	}
+	if len(rec.Steps) == 0 {
+		return "", errors.New("这个录制里没有步骤")
+	}
+	if dataset == nil {
+		dataset = map[string]string{}
+	}
+	name := rec.Name
+	if strings.TrimSpace(title) != "" {
+		name = rec.Name + " · " + strings.TrimSpace(title)
+	}
+	run, err := r.store.CreateRun(model.Run{
+		RecordingID:   rec.ID,
+		RecordingName: name,
+		Status:        "queued",
+		Mode:          "server",
+		Dataset:       dataset,
+		DatasetSource: "prelogin",
+		StartedAt:     time.Now(),
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := r.RunSync(ctx, run.ID); err != nil {
+		return run.ID, err
+	}
+	return run.ID, nil
+}
+
 /* ---------------------------------------------------------------- 执行 */
 
 // actionResult 对应 runtime/uitest-keys.js 里 runAction 的返回结构。
@@ -185,6 +251,37 @@ func (r *Runner) execute(ctx context.Context, runID string) {
 	r.finish(runID, "passed", "")
 }
 
+// maskStepValue 敏感步骤（密码框一类）只记掩码：值本身照常发给页面，但不进运行记录 / 日志。
+func maskStepValue(step model.Step, value string) string {
+	if !isSensitiveStep(step) {
+		return value
+	}
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "******"
+}
+
+// isSensitiveStep 判断这一步是不是敏感输入（录制时被脱敏过、或定位就是密码框）。
+func isSensitiveStep(step model.Step) bool {
+	if strings.Contains(step.Note, "敏感") || strings.Contains(step.Note, "脱敏") {
+		return true
+	}
+	low := strings.ToLower(step.Value)
+	for _, k := range []string{"{{password}}", "{{pass}}", "{{pwd}}", "{{secret}}"} {
+		if strings.Contains(low, k) {
+			return true
+		}
+	}
+	if strings.EqualFold(step.Action, "input") {
+		loc := strings.ToLower(step.Locator.Value)
+		if strings.Contains(loc, "password") || strings.Contains(loc, "passwd") {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runner) execStep(ctx context.Context, runID string, page *browser.Page, step model.Step, ds map[string]string) model.StepResult {
 	started := time.Now()
 	value := Substitute(step.Value, ds)
@@ -197,7 +294,7 @@ func (r *Runner) execStep(ctx context.Context, runID string, page *browser.Page,
 		StepID:     step.ID,
 		Action:     step.Action,
 		Annotation: annotation,
-		ValueUsed:  value,
+		ValueUsed:  maskStepValue(step, value),
 		Status:     "passed",
 	}
 	r.logf(runID, "info", step.Index, "▶ %s", annotation)

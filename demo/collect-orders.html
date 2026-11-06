@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>接口采集自测 · 订单列表</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#f6f8fc;color:#1f2430;font-size:14px}
+  .head{background:#fff;border-bottom:1px solid #e6e9f2;padding:14px 20px;display:flex;align-items:center;gap:12px}
+  .logo{width:32px;height:32px;border-radius:9px;background:#4f46e5;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .title{font-weight:600}
+  .grow{flex:1}
+  .wrap{padding:18px 20px;max-width:1040px;margin:0 auto}
+  .card{background:#fff;border:1px solid #e6e9f2;border-radius:12px;overflow:hidden}
+  .bar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #eef0f6}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #f1f3f9;font-size:13px}
+  th{background:#fafbfe;color:#5b6478;font-weight:600}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .btn{padding:7px 14px;border:1px solid #d6d9e3;background:#fff;border-radius:8px;font:inherit;cursor:pointer}
+  .btn.primary{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .muted{color:#8a90a2;font-size:12.5px}
+  .alert{margin:16px 0;padding:12px 14px;border-radius:10px;background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;display:none}
+  .alert.show{display:block}
+  .chip{display:inline-block;padding:1px 8px;border-radius:999px;background:#eef0ff;color:#4f46e5;font-size:12px}
+</style>
+</head>
+<body>
+<div class="head">
+  <div class="logo">采</div>
+  <div>
+    <div class="title">订单列表（需要登录）</div>
+    <div class="muted">每次请求都带 <code>Authorization: Bearer &lt;localStorage.demo_token&gt;</code> 和 <code>X-Tenant: demo</code></div>
+  </div>
+  <div class="grow"></div>
+  <span class="chip" id="state">检查登录态…</span>
+  <button class="btn" id="relogin">重新登录</button>
+</div>
+
+<div class="wrap">
+  <div class="alert" id="alert"></div>
+
+  <div class="card">
+    <div class="bar">
+      <b>订单</b>
+      <span class="muted" id="summary">加载中…</span>
+      <div class="grow"></div>
+      <button class="btn" id="prev">上一页</button>
+      <button class="btn primary" id="next">下一页</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>订单号</th><th>客户</th><th class="num">金额</th><th>状态</th><th>创建时间</th></tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+  <p class="muted">
+    自测要点：录制这个页面并勾「含页面文档」，会同时录到 1 条 <code>Document</code> 和 N 条
+    <code>XHR /demo/api/orders?page=…</code>；建任务后运行，日志里的
+    <code>Authorization</code> 应该是浏览器里最新的那个 token。
+  </p>
+</div>
+
+<script>
+(function () {
+  var page = 1, size = 5;
+  var rows = document.getElementById('rows');
+  var summary = document.getElementById('summary');
+  var state = document.getElementById('state');
+  var alertBox = document.getElementById('alert');
+
+  function token() {
+    try { return localStorage.getItem('demo_token') || ''; } catch (e) { return ''; }
+  }
+
+  function fail(text) {
+    alertBox.className = 'alert show';
+    alertBox.innerHTML = text;
+    rows.innerHTML = '<tr><td colspan="5" class="muted">没有数据</td></tr>';
+    summary.textContent = '—';
+  }
+
+  function render(data) {
+    alertBox.className = 'alert';
+    summary.textContent = '共 ' + data.total + ' 条，第 ' + data.page + '/' + data.pages + ' 页';
+    rows.innerHTML = (data.list || []).map(function (o) {
+      return '<tr><td>' + o.order_id + '</td><td>' + o.customer + '</td>' +
+        '<td class="num">' + o.amount.toFixed(2) + '</td><td>' + o.status + '</td>' +
+        '<td>' + o.created_at + '</td></tr>';
+    }).join('') || '<tr><td colspan="5" class="muted">本页没有数据</td></tr>';
+    document.getElementById('prev').disabled = page <= 1;
+    document.getElementById('next').disabled = page >= data.pages;
+  }
+
+  function load() {
+    var tk = token();
+    if (!tk) {
+      state.textContent = '未登录';
+      fail('还没有登录：先打开 <a href="/demo/collect-login.html">/demo/collect-login.html</a> 用 admin / 123456 登录一次。');
+      return;
+    }
+    state.textContent = '已登录（token ' + tk.slice(0, 16) + '…）';
+    fetch('/demo/api/orders?page=' + page + '&size=' + size, {
+      headers: { 'Authorization': 'Bearer ' + tk, 'X-Tenant': 'demo' }
+    }).then(function (res) {
+      return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; });
+    }).then(function (r) {
+      if (!r.ok) {
+        state.textContent = '登录失效';
+        fail('接口返回 ' + r.status + '：' + ((r.body && r.body.message) || '') +
+          ' —— 去 <a href="/demo/collect-login.html">登录页</a> 重新登录。');
+        return;
+      }
+      render(r.body.data);
+    }).catch(function (err) {
+      fail('请求失败：' + err);
+    });
+  }
+
+  document.getElementById('prev').addEventListener('click', function () { if (page > 1) { page--; load(); } });
+  document.getElementById('next').addEventListener('click', function () { page++; load(); });
+  document.getElementById('relogin').addEventListener('click', function () {
+    try { localStorage.removeItem('demo_token'); } catch (e) { }
+    location.href = '/demo/collect-login.html';
+  });
+  load();
+})();
+</script>
+</body>
+</html>

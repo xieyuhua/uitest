@@ -33,6 +33,11 @@ type Filter struct {
 	OnlyJSON bool
 	// Host 只保留某个站点
 	Host string
+
+	// includeRe / excludeRe 是 ParseFilter 里预编译好的正则。
+	// 否则 Match 对每一条录制都要重新 compile，一次筛几千条就是几千次编译。
+	includeRe *regexp.Regexp
+	excludeRe *regexp.Regexp
 }
 
 // ParseFilter 从 query string 解析筛选条件。
@@ -63,14 +68,18 @@ func ParseFilter(q url.Values) (Filter, error) {
 		f.MaxStatus = n
 	}
 	if f.Include != "" {
-		if _, err := regexp.Compile(f.Include); err != nil {
+		re, err := regexp.Compile(f.Include)
+		if err != nil {
 			return f, fmt.Errorf("include 正则不合法: %v", err)
 		}
+		f.includeRe = re
 	}
 	if f.Exclude != "" {
-		if _, err := regexp.Compile(f.Exclude); err != nil {
+		re, err := regexp.Compile(f.Exclude)
+		if err != nil {
 			return f, fmt.Errorf("exclude 正则不合法: %v", err)
 		}
+		f.excludeRe = re
 	}
 	return f, nil
 }
@@ -97,8 +106,27 @@ func inSet(list []string, v string) bool {
 	return false
 }
 
+// regexps 取预编译的正则；Filter 是值类型，也可能被直接构造（没走 ParseFilter），
+// 这时按需编译一次，保证两种用法行为一致。
+func (f Filter) regexps() (inc, exc *regexp.Regexp) {
+	inc, exc = f.includeRe, f.excludeRe
+	if inc == nil && f.Include != "" {
+		inc, _ = regexp.Compile(f.Include)
+	}
+	if exc == nil && f.Exclude != "" {
+		exc, _ = regexp.Compile(f.Exclude)
+	}
+	return inc, exc
+}
+
 // Match 判断一条录制结果是否通过筛选。
 func (f Filter) Match(r model.CapturedRequest) bool {
+	inc, exc := f.regexps()
+	return f.match(r, inc, exc)
+}
+
+// match 是已持有预编译正则的匹配实现（批量筛选只编译一次）。
+func (f Filter) match(r model.CapturedRequest, inc, exc *regexp.Regexp) bool {
 	if len(f.Methods) > 0 && !inSet(f.Methods, r.Method) {
 		return false
 	}
@@ -129,26 +157,21 @@ func (f Filter) Match(r model.CapturedRequest) bool {
 			return false
 		}
 	}
-	if f.Include != "" {
-		re, err := regexp.Compile(f.Include)
-		if err != nil || !re.MatchString(r.URL) {
-			return false
-		}
+	if f.Include != "" && (inc == nil || !inc.MatchString(r.URL)) {
+		return false
 	}
-	if f.Exclude != "" {
-		re, err := regexp.Compile(f.Exclude)
-		if err == nil && re.MatchString(r.URL) {
-			return false
-		}
+	if f.Exclude != "" && exc != nil && exc.MatchString(r.URL) {
+		return false
 	}
 	return true
 }
 
 // Apply 过滤整个列表（保持录制顺序）。
 func (f Filter) Apply(list []model.CapturedRequest) []model.CapturedRequest {
+	inc, exc := f.regexps()
 	out := make([]model.CapturedRequest, 0, len(list))
 	for _, r := range list {
-		if f.Match(r) {
+		if f.match(r, inc, exc) {
 			out = append(out, r)
 		}
 	}
@@ -219,13 +242,20 @@ var skipHeaders = map[string]bool{
 // Cookie / UA / Referer 走 Session，避免把过期时间点钉死在接口配置里。
 func EndpointFromCaptured(r model.CapturedRequest) model.HarvestEndpoint {
 	ep := model.HarvestEndpoint{
-		ID:           newID("ep_"),
-		Name:         defaultEndpointName(r),
-		Method:       strings.ToUpper(r.Method),
-		Enabled:      true,
-		URL:          r.URL,
-		SampleStatus: r.Status,
-		CreatedFrom:  r.ID,
+		ID:          newID("ep_"),
+		Name:        defaultEndpointName(r),
+		Method:      strings.ToUpper(r.Method),
+		Enabled:     true,
+		URL:         r.URL,
+		CreatedFrom: r.ID,
+		// 录制快照：原始请求头 / 请求体 / 来源页面 / 时间都留一份（明文，含 Cookie），
+		// 这样在「采集任务」详情里能直接看到当初录到了什么，不用回头找录制会话。
+		SampleHeaders: snapshotHeaders(r.ReqHeaders),
+		SampleReqBody: previewText(r.PostData, 16<<10),
+		SamplePageURL: r.PageURL,
+	}
+	if !r.At.IsZero() {
+		ep.SampleAt = r.At.Format("2006-01-02 15:04:05")
 	}
 	headers := map[string]string{}
 	for k, v := range r.ReqHeaders {
@@ -263,6 +293,18 @@ func EndpointFromCaptured(r model.CapturedRequest) model.HarvestEndpoint {
 	}
 	ep.Pagination = DetectPagination(r.URL, r.PostData, sampleRoot, sampleRecords)
 	return ep
+}
+
+// snapshotHeaders 录制快照用的请求头：原样保留（含 Cookie / Authorization），只做长度兜底。
+func snapshotHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = truncate(v, 1024)
+	}
+	return out
 }
 
 // defaultEndpointName 生成易读的接口名：GET /api/items。

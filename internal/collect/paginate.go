@@ -438,6 +438,21 @@ func NewPaginator(pag model.HarvestPagination) *Paginator {
 	return &Paginator{pag: e, value: e.Start}
 }
 
+// NewPaginatorFor 同 NewPaginator，但会把 in=auto 按 HTTP 方法定下来：
+// POST / PUT / PATCH 的翻页参数进 JSON 请求体，GET / DELETE 进 URL 查询串。
+func NewPaginatorFor(pag model.HarvestPagination, method string) *Paginator {
+	p := NewPaginator(pag)
+	if strings.EqualFold(p.pag.In, "auto") {
+		switch strings.ToUpper(strings.TrimSpace(method)) {
+		case "POST", "PUT", "PATCH":
+			p.pag.In = "body"
+		default:
+			p.pag.In = "query"
+		}
+	}
+	return p
+}
+
 // Describe 当前分页策略描述。
 func (p *Paginator) Describe() string { return p.pag.Describe() }
 
@@ -456,6 +471,8 @@ func (p *Paginator) Current() string {
 }
 
 // Apply 把当前页参数写进目标 URL（query）或请求体（body），返回改写后的两者。
+//
+// 配了「每页条数参数名」时，顺便把 page_size 也带上（size / limit / pageSize 这类站点很常见）。
 func (p *Paginator) Apply(target, body string) (string, string) {
 	if !p.pag.Enabled() {
 		return target, body
@@ -466,8 +483,18 @@ func (p *Paginator) Apply(target, body string) (string, string) {
 	} else {
 		value = strconv.Itoa(p.value)
 	}
+	size := ""
+	if p.pag.PageSize > 0 && strings.TrimSpace(p.pag.SizeParam) != "" {
+		size = strconv.Itoa(p.pag.PageSize)
+	}
 	if p.pag.In == "body" {
+		if size != "" {
+			body = setJSONBodyParam(body, p.pag.SizeParam, size)
+		}
 		return target, setJSONBodyParam(body, p.pag.Param, value)
+	}
+	if size != "" {
+		target = setQueryParam(target, p.pag.SizeParam, size)
 	}
 	if value == "" {
 		return removeQueryParam(target, p.pag.Param), body

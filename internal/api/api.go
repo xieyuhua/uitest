@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("POST /api/settings/notify/test", s.TestNotifySettings)
 
 	// ---- 接口采集：录制 → 筛选 → 建任务 → 定时 → 落库 ----
 	mux.HandleFunc("POST /api/collect/captures", s.startCapture)
@@ -111,6 +112,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collect/tasks/{id}/analyze", s.analyzeHarvestEndpoint)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/detect-pagination", s.detectPagination)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/test-sink", s.testHarvestSink)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/test-notify", s.testHarvestNotify)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/token", s.taskToken)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/prelogin", s.runPrelogin)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/selftest", s.selftestTask)
+
+	// 数据写入：可复用的落库配置（新建 / 测试 / 保存 / 删除）
+	mux.HandleFunc("GET /api/collect/sinks", s.listSinkProfiles)
+	mux.HandleFunc("POST /api/collect/sinks", s.saveSinkProfile)
+	mux.HandleFunc("POST /api/collect/sinks/test", s.testSinkProfile)
+	mux.HandleFunc("GET /api/collect/sinks/{id}", s.getSinkProfile)
+	mux.HandleFunc("PUT /api/collect/sinks/{id}", s.saveSinkProfile)
+	mux.HandleFunc("DELETE /api/collect/sinks/{id}", s.deleteSinkProfile)
 
 	mux.HandleFunc("GET /api/collect/runs", s.listHarvestRuns)
 	mux.HandleFunc("GET /api/collect/runs/{id}", s.getHarvestRun)
@@ -125,7 +138,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/collect/files", s.clearHarvestFiles)
 	mux.HandleFunc("GET /api/collect/files/{name}", s.downloadHarvestFile)
 
-	return cors(logRequests(mux))
+	return cors(logRequests(withAPIFallback(mux)))
+}
+
+// withAPIFallback 给 /api/ 下未命中的请求补上 JSON 兜底。
+//
+// net/http 的 ServeMux 默认返回纯文本 404/405，而 docs/API.md 约定的失败格式是
+// {"error": "..."}；控制台也是按 JSON 解析错误信息的。这里统一改写：
+//   - 路径没有注册：404 + JSON
+//   - 路径存在、只是方法不对：405 + JSON（保留 Allow 头，方便调用方排查）
+func withAPIFallback(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 命中路由时必须走 ServeMux.ServeHTTP 而不是 mux.Handler 返回的 handler，
+		// 否则 {id} 这类通配段不会写进 r.PathValue，接口里取到的是空字符串。
+		if _, pattern := mux.Handler(r); pattern != "" || !strings.HasPrefix(r.URL.Path, "/api/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		if allow := otherMethods(mux, r); len(allow) > 0 {
+			w.Header().Set("Allow", strings.Join(allow, ", "))
+			writeErr(w, http.StatusMethodNotAllowed,
+				"接口 "+r.URL.Path+" 不支持 "+r.Method+" 方法，可用："+strings.Join(allow, ", "))
+			return
+		}
+		writeErr(w, http.StatusNotFound, "接口不存在："+r.URL.Path)
+	})
+}
+
+// otherMethods 找出同一路径下已注册的其它方法，用来区分「404 不存在」和「405 方法不对」。
+func otherMethods(mux *http.ServeMux, r *http.Request) []string {
+	var out []string
+	for _, m := range []string{
+		http.MethodGet, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodHead,
+	} {
+		if m == r.Method {
+			continue
+		}
+		probe := r.Clone(r.Context())
+		probe.Method = m
+		if _, pattern := mux.Handler(probe); pattern != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 /* ----------------------------------------------------------------- 中间件 */

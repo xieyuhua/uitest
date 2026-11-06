@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -188,6 +189,8 @@ func (s *Server) getCapture(w http.ResponseWriter, r *http.Request) {
 			"stopped":    sess.Stopped,
 			"note":       sess.Note,
 			"user_agent": sess.UserAgent,
+			"types":      sess.Types,
+			"skipped":    s.Collect.Recorder.SkippedTypes(id),
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -300,7 +303,17 @@ type harvestTaskReq struct {
 	Throttle *model.HarvestThrottle `json:"throttle"`
 	Sink     *model.HarvestSink     `json:"sink"`
 	Session  *model.HarvestSession  `json:"session"`
-	Status   string                 `json:"status"`
+	// Prelogin 运行前先跑一段 UI 自动化（登录）
+	Prelogin *model.HarvestPrelogin `json:"prelogin"`
+	// Notify 跑完把成功/失败推到企业微信群机器人
+	Notify *model.HarvestNotify `json:"notify"`
+	// Common 公共参数（所有接口共用；登录后的浏览器头与脚本会覆盖同名项）
+	Common *model.HarvestCommon `json:"common"`
+	Status string               `json:"status"`
+	// SplitByEndpoint 每个接口单独分表 / 分文件
+	SplitByEndpoint bool `json:"split_by_endpoint"`
+	// SinkProfileID 来源的落库配置 id（仅做溯源）
+	SinkProfileID string `json:"sink_profile_id"`
 }
 
 // createHarvestTask POST /api/collect/tasks
@@ -317,7 +330,7 @@ func (s *Server) createHarvestTask(w http.ResponseWriter, r *http.Request) {
 		Schedule:    model.HarvestSchedule{Mode: "manual"},
 		Throttle:    model.DefaultThrottle(),
 		Sink:        model.DefaultSink(),
-		Session:     model.HarvestSession{Mode: "none"},
+		Session:     model.HarvestSession{Mode: "browser"},
 		Status:      "active",
 	}
 	task.Endpoints = req.Endpoints
@@ -328,8 +341,10 @@ func (s *Server) createHarvestTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		task.Endpoints = eps
-		if task.Session.Mode == "none" && ua != "" {
-			task.Session = model.HarvestSession{Mode: "browser", UserAgent: ua, Host: originOfFirst(eps)}
+		// 会话统一走浏览器：顺手把录制时的 UA 与站点带上（留空时运行期再自动推断）
+		task.Session.UserAgent = ua
+		if strings.TrimSpace(task.Session.Host) == "" {
+			task.Session.Host = originOfFirst(eps)
 		}
 	}
 	if len(task.Endpoints) == 0 {
@@ -348,9 +363,14 @@ func (s *Server) createHarvestTask(w http.ResponseWriter, r *http.Request) {
 	if req.Session != nil {
 		task.Session = *req.Session
 	}
+	task.Prelogin = req.Prelogin
+	task.Notify = req.Notify
+	task.Common = req.Common
 	if req.Status != "" {
 		task.Status = req.Status
 	}
+	task.SplitByEndpoint = req.SplitByEndpoint
+	task.SinkProfileID = strings.TrimSpace(req.SinkProfileID)
 
 	out, err := s.DB.CreateHarvestTask(task)
 	if err != nil {
@@ -386,7 +406,8 @@ func (s *Server) endpointsFromCapture(captureID string, requestIDs []string) ([]
 			continue
 		}
 		ep := collect.EndpointFromCaptured(e)
-		ep.SampleBody = e.BodyPreview
+		// 响应样本留一份（任务详情里能回看"当初这条接口返回的什么结构"）
+		ep.SampleBody = collect.ClipText(e.BodyPreview, 48<<10)
 		out = append(out, ep)
 	}
 	if len(out) == 0 {
@@ -413,36 +434,58 @@ func (s *Server) listHarvestTasks(w http.ResponseWriter, r *http.Request) {
 func harvestTaskView(t model.HarvestTask, running bool, withSamples bool) map[string]any {
 	eps := t.Endpoints
 	if !withSamples {
+		// 列表页不带录制快照的大字段（响应体 / 请求体 / 请求头）
 		eps = make([]model.HarvestEndpoint, len(t.Endpoints))
 		for i, e := range t.Endpoints {
 			e.SampleBody = ""
+			e.SampleReqBody = ""
+			e.SampleHeaders = nil
 			eps[i] = e
 		}
 	}
+	// 每个接口实际会写到哪儿（接口级 sink 覆盖 / 按接口分表）
+	endpointSinks := make(map[string]any, len(t.Endpoints))
+	for _, e := range t.Endpoints {
+		cfg := t.EndpointSink(e)
+		endpointSinks[e.ID] = map[string]any{
+			"driver": cfg.Driver,
+			"table":  cfg.Table,
+			"target": sinkTargetText(cfg),
+		}
+	}
 	return map[string]any{
-		"id":             t.ID,
-		"name":           t.Name,
-		"description":    t.Description,
-		"start_url":      t.StartURL,
-		"status":         t.Status,
-		"endpoints":      eps,
-		"endpoint_count": t.EndpointCount(),
-		"schedule":       t.Schedule,
-		"schedule_text":  collect.DescribeSchedule(t.Schedule),
-		"throttle":       t.Throttle,
-		"sink":           t.Sink,
-		"sink_file":      sinkFileName(t.Sink),
-		"session":        t.Session,
-		"created_at":     t.CreatedAt,
-		"updated_at":     t.UpdatedAt,
-		"last_run_at":    t.LastRunAt,
-		"next_run_at":    t.NextRunAt,
-		"last_status":    t.LastStatus,
-		"last_error":     t.LastError,
-		"last_written":   t.LastWritten,
-		"run_count":      t.RunCount,
-		"fail_streak":    t.FailStreak,
-		"running":        running,
+		"id":                t.ID,
+		"name":              t.Name,
+		"description":       t.Description,
+		"start_url":         t.StartURL,
+		"status":            t.Status,
+		"endpoints":         eps,
+		"endpoint_count":    t.EndpointCount(),
+		"schedule":          t.Schedule,
+		"schedule_text":     collect.DescribeSchedule(t.Schedule),
+		"throttle":          t.Throttle,
+		"sink":              t.Sink,
+		"sink_file":         sinkFileName(t.Sink),
+		"sink_target":       sinkTargetText(t.Sink),
+		"split_by_endpoint": t.SplitByEndpoint,
+		"sink_profile_id":   t.SinkProfileID,
+		"endpoint_sinks":    endpointSinks,
+		"session":           t.Session,
+		"prelogin":          t.Prelogin,
+		"prelogin_text":     preloginText(t.Prelogin),
+		"notify":            t.Notify,
+		"notify_text":       notifyText(t.Notify),
+		"common":            t.Common,
+		"created_at":        t.CreatedAt,
+		"updated_at":        t.UpdatedAt,
+		"last_run_at":       t.LastRunAt,
+		"next_run_at":       t.NextRunAt,
+		"last_status":       t.LastStatus,
+		"last_error":        t.LastError,
+		"last_written":      t.LastWritten,
+		"run_count":         t.RunCount,
+		"fail_streak":       t.FailStreak,
+		"running":           running,
 	}
 }
 
@@ -466,6 +509,16 @@ type patchHarvestTaskReq struct {
 	Throttle    *model.HarvestThrottle   `json:"throttle"`
 	Sink        *model.HarvestSink       `json:"sink"`
 	Session     *model.HarvestSession    `json:"session"`
+	// Prelogin 运行前先跑一段 UI 自动化（登录）
+	Prelogin *model.HarvestPrelogin `json:"prelogin"`
+	// Notify 跑完把成功/失败推到企业微信群机器人（传 null 表示关掉）
+	Notify *model.HarvestNotify `json:"notify"`
+	// Common 公共参数（传 null / 省略表示清空）
+	Common *model.HarvestCommon `json:"common"`
+	// SplitByEndpoint 每个接口单独分表 / 分文件
+	SplitByEndpoint *bool `json:"split_by_endpoint"`
+	// SinkProfileID 来源的落库配置 id（仅做溯源）
+	SinkProfileID *string `json:"sink_profile_id"`
 }
 
 // patchHarvestTask PATCH /api/collect/tasks/{id}
@@ -524,6 +577,28 @@ func (s *Server) patchHarvestTask(w http.ResponseWriter, r *http.Request) {
 	if req.Session != nil {
 		t.Session = *req.Session
 	}
+	if req.Prelogin != nil {
+		pl := *req.Prelogin
+		if pl.Enabled && strings.TrimSpace(pl.RecordingID) == "" {
+			writeErr(w, http.StatusBadRequest, "前置登录开了但没有选「登录流程录制」")
+			return
+		}
+		t.Prelogin = &pl
+	}
+	// 通知：传对象就按传的存，传 null / 省略视为关掉（控制台每次保存都会带上这个字段）
+	t.Notify = req.Notify
+	if t.Notify != nil && t.Notify.Enabled && strings.TrimSpace(t.Notify.Webhook) == "" {
+		writeErr(w, http.StatusBadRequest, "通知开了但没填 Webhook 地址")
+		return
+	}
+	// 公共参数：传对象就按传的存，传 null / 省略视为清空
+	t.Common = req.Common
+	if req.SplitByEndpoint != nil {
+		t.SplitByEndpoint = *req.SplitByEndpoint
+	}
+	if req.SinkProfileID != nil {
+		t.SinkProfileID = strings.TrimSpace(*req.SinkProfileID)
+	}
 	saved, err := s.DB.SaveHarvestTask(t)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -557,6 +632,8 @@ func (s *Server) runHarvestTask(w http.ResponseWriter, r *http.Request) {
 
 type previewReq struct {
 	Limit int `json:"limit"`
+	// EndpointID 非空时只试抓这一个接口
+	EndpointID string `json:"endpoint_id"`
 }
 
 // previewHarvestTask POST /api/collect/tasks/{id}/preview —— 试抓一次，不写库
@@ -570,7 +647,7 @@ func (s *Server) previewHarvestTask(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := timeoutCtx(r, 180*time.Second)
 	defer cancel()
-	results := s.Collect.Harvester.Preview(ctx, t, req.Limit)
+	results := s.Collect.Harvester.Preview(ctx, t, req.Limit, strings.TrimSpace(req.EndpointID))
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
 
@@ -618,6 +695,142 @@ func (s *Server) analyzeHarvestEndpoint(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeErr(w, http.StatusNotFound, "接口不存在")
+}
+
+type selftestReq struct {
+	// RunPrelogin 顺便跑一遍前置登录（UI 自动化），把整条链路都测了
+	RunPrelogin bool `json:"run_prelogin"`
+}
+
+// selftestTask POST /api/collect/tasks/{id}/selftest —— 走一遍「登录 → 导出会话 → 真发一次请求」并逐步报告
+func (s *Server) selftestTask(w http.ResponseWriter, r *http.Request) {
+	var req selftestReq
+	_ = readJSON(r, &req)
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	ctx, cancel := timeoutCtx(r, 300*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.Collect.Harvester.SelfTest(ctx, t, req.RunPrelogin))
+}
+
+// runPrelogin POST /api/collect/tasks/{id}/prelogin —— 现在就跑一遍前置登录（顺便导出会话看结果）
+func (s *Server) runPrelogin(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if t.Prelogin == nil || !t.Prelogin.Active() {
+		writeErr(w, http.StatusBadRequest, "这个任务没有配置前置登录（先选一个「登录流程录制」并打开开关）")
+		return
+	}
+	if s.Runner == nil {
+		writeErr(w, http.StatusBadRequest, "服务没有装配 UI 自动化执行器")
+		return
+	}
+	cfg := t.Prelogin.Effective()
+	ctx, cancel := timeoutCtx(r, time.Duration(cfg.TimeoutSeconds+30)*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	vars := s.Collect.Harvester.PreloginVars(cfg)
+	runID, rerr := s.Runner.RunRecordingSync(ctx, cfg.RecordingID, "采集前置登录（手动）", vars)
+	out := map[string]any{
+		"ok":         rerr == nil,
+		"run_id":     runID,
+		"elapsed_ms": time.Since(start).Milliseconds(),
+	}
+	if rerr != nil {
+		out["error"] = rerr.Error()
+	}
+	if len(vars) == 0 {
+		out["warning"] = "没配「登录用变量」：录制时密码框会被脱敏成 {{password}}，回放填的是字面量，登录多半失败"
+	} else if strings.TrimSpace(vars["password"]) == "" {
+		out["warning"] = "变量里没有 password：如果登录表单有密码框，回放会填成 {{password}}"
+	}
+	// 顺便按当前登录状态导一次会话，让他确认"刷新好了没"
+	cookies, token, serr := s.Collect.Harvester.ProbeSession(ctx, t)
+	if serr != nil {
+		out["session_error"] = serr.Error()
+	} else {
+		out["cookie_count"] = cookies
+		if token != "" {
+			out["token_preview"] = tokenPreview(token)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// preloginText 前置登录的人可读描述。
+func preloginText(p *model.HarvestPrelogin) string {
+	if p == nil || !p.Active() {
+		return ""
+	}
+	cfg := p.Effective()
+	name := strings.TrimSpace(cfg.RecordingName)
+	if name == "" {
+		name = cfg.RecordingID
+	}
+	return "运行前执行「" + name + "」（" + cfg.ModeText() + "）"
+}
+
+// notifyText 运行通知的人可读描述。
+func notifyText(n *model.HarvestNotify) string {
+	if n == nil || !n.Active() {
+		return ""
+	}
+	var when []string
+	if n.WantSuccess() {
+		when = append(when, "成功")
+	}
+	if n.WantFailure() {
+		when = append(when, "失败")
+	}
+	if len(when) == 0 {
+		return "通知已配置（成功/失败都不推，等于没开）"
+	}
+	text := "企业微信群:" + strings.Join(when, "、") + "都推"
+	if len(n.Mentioned) > 0 {
+		text += "（@ " + strings.Join(n.Mentioned, "、") + "）"
+	}
+	return text
+}
+
+// taskToken POST /api/collect/tasks/{id}/token —— 现在读一次 Token（控制台「读取 Token」按钮用）
+//
+// 浏览器模式会真的打开内置浏览器按当前登录状态重读（不吃缓存），用来确认"token 现在是不是最新的"。
+func (s *Server) taskToken(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	ctx, cancel := timeoutCtx(r, 90*time.Second)
+	defer cancel()
+	header, prefix, token, err := s.Collect.Harvester.ProbeToken(ctx, t)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"header":  header,
+		"prefix":  prefix,
+		"token":   token,
+		"length":  len(token),
+		"preview": tokenPreview(token),
+	})
+}
+
+// tokenPreview 只露头尾（列表/提示里用），完整值单独放在 token 字段里。
+func tokenPreview(tok string) string {
+	if len(tok) <= 24 {
+		return tok
+	}
+	return tok[:12] + "…" + tok[len(tok)-8:]
 }
 
 // detectPagination POST /api/collect/tasks/{id}/detect-pagination
@@ -682,8 +895,26 @@ func (s *Server) testHarvestSink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "落库目标可用"})
 }
 
-/* ------------------------------------------------------------------ 运行 */
+// testHarvestNotify POST /api/collect/tasks/{id}/test-notify —— 用系统设置里的企业微信机器人发一条测试消息
+func (s *Server) testHarvestNotify(w http.ResponseWriter, r *http.Request) {
+	cfg := s.DB.Settings().Notify
+	if !cfg.Active() {
+		writeErr(w, http.StatusBadRequest, "还没启用通知，或 Webhook 地址为空（去「设置 → 运行通知」配置）")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	content := collect.WeComTestMessage(cfg)
+	if err := collect.SendWeCom(ctx, cfg.Webhook, content, cfg.Mentioned); err != nil {
+		writeErr(w, http.StatusBadRequest, "发送失败："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "message": "测试消息已发送，去企业微信群里看一眼", "content": content,
+	})
+}
 
+/* ------------------------------------------------------------------ 运行 */
 // listHarvestRuns GET /api/collect/runs?task_id=&limit=
 func (s *Server) listHarvestRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -789,6 +1020,138 @@ func (s *Server) harvestRunEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+/* -------------------------------------------------------- 数据写入（落库配置） */
+
+// sinkProfileView 落库配置的前端视图（补上人可读的写入目标）。
+func sinkProfileView(p model.SinkProfile) map[string]any {
+	return map[string]any{
+		"id":         p.ID,
+		"name":       p.Name,
+		"driver":     p.Driver,
+		"dsn":        p.DSN,
+		"table":      p.Table,
+		"mode":       p.Mode,
+		"key_column": p.KeyColumn,
+		"batch_size": p.BatchSize,
+		"note":       p.Note,
+		"target":     sinkTargetText(p.HarvestSink),
+		"file":       sinkFileName(p.HarvestSink),
+		"created_at": p.CreatedAt,
+		"updated_at": p.UpdatedAt,
+	}
+}
+
+// sinkTargetText 人可读的写入目标描述。
+func sinkTargetText(cfg model.HarvestSink) string {
+	if f := sinkFileName(cfg); f != "" {
+		return "文件 harvest/" + f
+	}
+	table := strings.TrimSpace(cfg.Table)
+	if table == "" {
+		table = "harvest_records"
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Driver)) {
+	case "mysql":
+		return "MySQL 表 " + table
+	case "postgres", "postgresql", "pgsql":
+		return "PostgreSQL 表 " + table
+	default:
+		return "SQLite 表 " + table
+	}
+}
+
+// listSinkProfiles GET /api/collect/sinks
+func (s *Server) listSinkProfiles(w http.ResponseWriter, r *http.Request) {
+	items := s.DB.ListSinkProfiles()
+	out := make([]map[string]any, 0, len(items))
+	for _, p := range items {
+		out = append(out, sinkProfileView(p))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// getSinkProfile GET /api/collect/sinks/{id}
+func (s *Server) getSinkProfile(w http.ResponseWriter, r *http.Request) {
+	p, err := s.DB.GetSinkProfile(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sinkProfileView(p))
+}
+
+// sinkProfileReq 新建 / 保存落库配置的请求体（sink 字段直接展开在同一层）。
+type sinkProfileReq struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Note string `json:"note"`
+	model.HarvestSink
+}
+
+// saveSinkProfile POST /api/collect/sinks | PUT /api/collect/sinks/{id}
+func (s *Server) saveSinkProfile(w http.ResponseWriter, r *http.Request) {
+	var req sinkProfileReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	p := model.SinkProfile{
+		ID:          strings.TrimSpace(r.PathValue("id")),
+		Name:        strings.TrimSpace(req.Name),
+		Note:        req.Note,
+		HarvestSink: req.HarvestSink,
+	}
+	out, err := s.DB.SaveSinkProfile(p)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sinkProfileView(out))
+}
+
+// deleteSinkProfile DELETE /api/collect/sinks/{id}
+func (s *Server) deleteSinkProfile(w http.ResponseWriter, r *http.Request) {
+	if err := s.DB.DeleteSinkProfile(r.PathValue("id")); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// testSinkProfile POST /api/collect/sinks/test —— 试连一次（id 或直接给 sink 字段都行）
+func (s *Server) testSinkProfile(w http.ResponseWriter, r *http.Request) {
+	var req sinkProfileReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	cfg := req.HarvestSink
+	if cfg.Driver == "" {
+		id := strings.TrimSpace(r.PathValue("id"))
+		if id == "" {
+			id = strings.TrimSpace(req.ID)
+		}
+		if id != "" {
+			if p, err := s.DB.GetSinkProfile(id); err == nil {
+				cfg = p.HarvestSink
+			}
+		}
+	}
+	if strings.TrimSpace(cfg.Driver) == "" {
+		writeErr(w, http.StatusBadRequest, "还没选择落库类型")
+		return
+	}
+	if err := s.Collect.ProbeSink(cfg); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "连接成功：" + sinkTargetText(cfg),
+		"target":  sinkTargetText(cfg),
+	})
 }
 
 /* -------------------------------------------------------------- 产出文件 */
@@ -994,10 +1357,9 @@ func (s *Server) collectOptions(w http.ResponseWriter, r *http.Request) {
 			{"value": "postgres", "label": "PostgreSQL", "dsn_hint": "postgres://user:pass@127.0.0.1:5432/dbname?sslmode=disable"},
 			{"value": "jsonl", "label": "JSON Lines（.jsonl，追加写 / pandas 直读）", "dsn_hint": "无需 dsn，写到 <数据目录>/harvest/<表名>.jsonl"},
 		},
+		// 会话来源只剩一种：浏览器登录态（Cookie + 请求头都从内置浏览器取）
 		"session_modes": []map[string]string{
-			{"value": "browser", "label": "复用内置浏览器登录态（推荐）"},
-			{"value": "cookie", "label": "手工粘贴 Cookie"},
-			{"value": "none", "label": "无会话（公开接口）"},
+			{"value": "browser", "label": "浏览器登录态（前置登录后共享 Cookie 与请求头）"},
 		},
 		"resource_types": []string{"XHR", "Fetch", "Document"},
 		"defaults": map[string]any{

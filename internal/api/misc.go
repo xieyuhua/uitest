@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"uitest-server/internal/browser"
+	"uitest-server/internal/collect"
 	"uitest-server/internal/model"
 )
 
@@ -23,6 +26,7 @@ type settingsView struct {
 	AI      aiSettingsView        `json:"ai"`
 	Browser model.BrowserSettings `json:"browser"`
 	Assist  model.AssistSettings  `json:"assist"`
+	Notify  model.NotifySettings  `json:"notify"`
 	Server  map[string]any        `json:"server"`
 }
 
@@ -46,6 +50,7 @@ func (s *Server) settingsView() settingsView {
 		},
 		Browser: st.Browser,
 		Assist:  st.Assist,
+		Notify:  st.Notify,
 		Server:  map[string]any{"port": s.Port, "version": s.Version},
 	}
 }
@@ -78,6 +83,14 @@ type putSettingsReq struct {
 		StableIDHint  *bool `json:"stable_id_hint"`
 		AutoRebindUID *bool `json:"auto_rebind_uid"`
 	} `json:"assist"`
+	Notify *struct {
+		Enabled   *bool     `json:"enabled"`
+		Webhook   *string   `json:"webhook"`
+		OnSuccess *bool     `json:"on_success"`
+		OnFailure *bool     `json:"on_failure"`
+		Mentioned *[]string `json:"mentioned"`
+		BaseURL   *string   `json:"base_url"`
+	} `json:"notify"`
 }
 
 // putSettings PUT /api/settings
@@ -158,13 +171,63 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			st.Assist.AutoRebindUID = *req.Assist.AutoRebindUID
 		}
 	}
+	if req.Notify != nil {
+		if req.Notify.Enabled != nil {
+			st.Notify.Enabled = *req.Notify.Enabled
+		}
+		if req.Notify.Webhook != nil {
+			st.Notify.Webhook = strings.TrimSpace(*req.Notify.Webhook)
+		}
+		if req.Notify.OnSuccess != nil {
+			v := *req.Notify.OnSuccess
+			st.Notify.OnSuccess = &v
+		}
+		if req.Notify.OnFailure != nil {
+			v := *req.Notify.OnFailure
+			st.Notify.OnFailure = &v
+		}
+		if req.Notify.Mentioned != nil {
+			out := make([]string, 0, len(*req.Notify.Mentioned))
+			for _, m := range *req.Notify.Mentioned {
+				if m = strings.TrimSpace(m); m != "" {
+					out = append(out, m)
+				}
+			}
+			st.Notify.Mentioned = out
+		}
+		if req.Notify.BaseURL != nil {
+			st.Notify.BaseURL = strings.TrimRight(strings.TrimSpace(*req.Notify.BaseURL), "/")
+		}
+		if st.Notify.Enabled && strings.TrimSpace(st.Notify.Webhook) == "" {
+			writeErr(w, http.StatusBadRequest, "通知开启了但 Webhook 地址为空")
+			return
+		}
+	}
 	s.DB.SaveSettings(st)
 	s.BR.ApplySettings(st.Browser)
 	writeJSON(w, http.StatusOK, s.settingsView())
 }
 
-/* -------------------------------------------------------------- 浏览器 */
+// TestNotifySettings POST /api/settings/notify/test —— 用当前保存的企业微信机器人发一条测试消息
+func (s *Server) TestNotifySettings(w http.ResponseWriter, r *http.Request) {
+	cfg := s.DB.Settings().Notify
+	if !cfg.Active() {
+		writeErr(w, http.StatusBadRequest, "还没启用通知，或 Webhook 地址为空")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	content := collect.WeComTestMessage(cfg)
+	if err := collect.SendWeCom(ctx, cfg.Webhook, content, cfg.Mentioned); err != nil {
+		writeErr(w, http.StatusBadRequest, "发送失败："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "message": "测试消息已发送，去企业微信群里看一眼", "content": content,
+	})
+}
 
+/* -------------------------------------------------------------- 浏览器 */
 // browserStatus GET /api/browser/status
 func (s *Server) browserStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.BR.Status())

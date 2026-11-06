@@ -271,3 +271,76 @@ func (db *DB) HarvestTasksForSchedule() []model.HarvestTask {
 	sort.Slice(out, func(i, j int) bool { return out[i].NextRunAt.Before(out[j].NextRunAt) })
 	return out
 }
+
+/* -------------------------------------------------------- 落库配置（数据写入） */
+
+// ListSinkProfiles 列出全部落库配置（按更新时间倒序）。
+func (db *DB) ListSinkProfiles() []model.SinkProfile {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	out := make([]model.SinkProfile, 0, len(db.data.HarvestSinks))
+	for _, p := range db.data.HarvestSinks {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out
+}
+
+// GetSinkProfile 取一套落库配置。
+func (db *DB) GetSinkProfile(id string) (model.SinkProfile, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	p, ok := db.data.HarvestSinks[id]
+	if !ok {
+		return model.SinkProfile{}, ErrNotFound
+	}
+	return *p, nil
+}
+
+// SaveSinkProfile 新建或整体覆盖一套落库配置（id 为空则新建）。
+func (db *DB) SaveSinkProfile(p model.SinkProfile) (model.SinkProfile, error) {
+	p.Name = strings.TrimSpace(p.Name)
+	if p.Name == "" {
+		return model.SinkProfile{}, errors.New("配置名称不能为空")
+	}
+	if p.Driver == "" {
+		p.Driver = "sqlite"
+	}
+	if p.Table == "" {
+		p.Table = "harvest_records"
+	}
+	if !strings.EqualFold(p.Mode, "upsert") {
+		p.Mode = "append"
+	}
+	if p.BatchSize <= 0 {
+		p.BatchSize = 200
+	}
+	now := time.Now()
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if p.ID == "" {
+		p.ID = randID("snk_")
+		p.CreatedAt = now
+	} else if old, ok := db.data.HarvestSinks[p.ID]; ok {
+		p.CreatedAt = old.CreatedAt
+	} else {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	cp := p
+	db.data.HarvestSinks[p.ID] = &cp
+	db.markDirty()
+	return cp, nil
+}
+
+// DeleteSinkProfile 删除一套落库配置（已经复制到任务里的配置不受影响）。
+func (db *DB) DeleteSinkProfile(id string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if _, ok := db.data.HarvestSinks[id]; !ok {
+		return ErrNotFound
+	}
+	delete(db.data.HarvestSinks, id)
+	db.markDirty()
+	return nil
+}

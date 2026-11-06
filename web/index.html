@@ -6,18 +6,19 @@
 <title>UI 自动化测试平台</title>
 <link rel="stylesheet" href="styles.css">
 <style>
-  /* 仅首屏必要样式：避免样式表加载前闪烁 */
+  /* 首屏兜底：样式表加载前不要闪白（其余样式都在 styles.css） */
   html, body { margin: 0; background: #f5f6fa; color: #1f2430; }
-  #app { min-height: 60vh; }
 </style>
 </head>
 <body>
 
-<!-- ===== 顶部固定导航栏 ===== -->
-<header class="topbar">
-  <div class="topbar-inner">
-    <a class="brand" href="#/recordings" title="UI 自动化测试平台">
-      <span class="brand-mark" aria-hidden="true">
+<!-- ===================== 后台框架：左侧菜单 + 右侧主区 ===================== -->
+<div class="shell" id="shell">
+
+  <!-- ===== 侧边菜单 ===== -->
+  <aside class="sidebar">
+    <a class="side-brand" href="#/recordings" title="UI 自动化测试平台">
+      <span class="side-brand-mark" aria-hidden="true">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="4" width="18" height="13" rx="2"></rect>
@@ -27,27 +28,132 @@
           <path d="M7 12.5h7"></path>
         </svg>
       </span>
-      <span class="brand-name">UI 自动化测试平台</span>
+      <span class="side-brand-text">UI 自动化测试平台</span>
     </a>
 
-    <nav class="nav" id="nav" aria-label="主导航">
-      <a class="nav-item" href="#/recordings" data-nav="recordings">录制</a>
-      <a class="nav-item" href="#/runs" data-nav="runs">运行</a>
-      <a class="nav-item" href="#/collect" data-nav="collect">接口采集</a>
-      <a class="nav-item" href="#/elements" data-nav="elements">元素库</a>
-      <a class="nav-item" href="#/settings" data-nav="settings">设置</a>
-      <a class="nav-item nav-item--ext" href="/demo/gallery.html" target="_blank" rel="noopener" title="打开示例场景总览（新标签页）">示例场景 ↗</a>
+    <nav class="side-nav" id="nav" aria-label="主导航">
+      <p class="side-group">测试</p>
+
+      <a class="nav-item" href="#/recordings" data-nav="recordings" title="录制">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8.2"></circle>
+            <circle cx="12" cy="12" r="3.1" fill="currentColor" stroke="none"></circle>
+          </svg>
+        </span>
+        <span class="nav-label">录制</span>
+        <span class="nav-badge hidden" id="nav-rec-count" title="录制总数"></span>
+      </a>
+
+      <a class="nav-item" href="#/runs" data-nav="runs" title="运行">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8.2"></circle>
+            <path d="M10 8.6l5.2 3.4-5.2 3.4z" fill="currentColor" stroke="none"></path>
+          </svg>
+        </span>
+        <span class="nav-label">运行</span>
+      </a>
+
+      <p class="side-group">数据</p>
+
+      <a class="nav-item" href="#/collect/captures" data-nav="collect" title="接口采集">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3.5v10"></path>
+            <path d="M7.8 9.5l4.2 4.2 4.2-4.2"></path>
+            <path d="M4.5 19.5h15"></path>
+          </svg>
+        </span>
+        <span class="nav-label">接口采集</span>
+      </a>
+
+      <!-- 接口采集二级菜单：由 app.js 按 COLLECT_SECTIONS 渲染 -->
+      <div class="nav-sub" id="collect-sub"></div>
+
+      <a class="nav-item" href="#/elements" data-nav="elements" title="元素库">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="7"></circle>
+            <circle cx="12" cy="12" r="2.4"></circle>
+            <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"></path>
+          </svg>
+        </span>
+        <span class="nav-label">元素库</span>
+      </a>
+
+      <p class="side-group">系统</p>
+
+      <a class="nav-item" href="#/settings/ai" data-nav="settings" title="设置">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3.1"></circle>
+            <path d="M12 2.8v2.6M12 18.6v2.6M3.2 12h2.6M18.2 12h2.6M5.8 5.8l1.8 1.8M16.4 16.4l1.8 1.8M18.2 5.8l-1.8 1.8M7.6 16.4l-1.8 1.8"></path>
+          </svg>
+        </span>
+        <span class="nav-label">设置</span>
+      </a>
+
+      <!-- 设置二级菜单：由 app.js 按 SETTINGS_SECTIONS 渲染 -->
+      <div class="nav-sub" id="settings-sub"></div>
+
+      <a class="nav-item nav-item--ext" href="/demo/gallery.html" target="_blank" rel="noopener"
+         title="打开示例场景总览（新标签页）">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 4h6v6"></path>
+            <path d="M20 4l-8.5 8.5"></path>
+            <path d="M18 14.5V19a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 19V7.5A1.5 1.5 0 0 1 5.5 6H10"></path>
+          </svg>
+        </span>
+        <span class="nav-label">示例场景</span>
+      </a>
     </nav>
 
-    <!-- 健康徽章 + 内置浏览器状态（app.js 内部渲染） -->
-    <div class="health" id="health">
-      <span class="badge badge--pending"><i class="dot"></i>连接中…</span>
+    <div class="side-foot">
+      <span class="side-foot-text">v<span id="side-ver">—</span></span>
+      <button class="side-collapse" id="side-collapse" type="button" title="收起菜单" aria-label="收起菜单">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 6l-6 6 6 6"></path>
+        </svg>
+      </button>
     </div>
-  </div>
-</header>
+  </aside>
 
-<!-- ===== 页面容器：全部内容由 app.js 渲染 ===== -->
-<main id="app" class="app"></main>
+  <!-- 移动端：抽屉遮罩 -->
+  <div class="side-mask" id="side-mask" hidden></div>
+
+  <!-- ===== 右侧主区 ===== -->
+  <div class="shell-main">
+    <header class="topbar">
+      <button class="topbar-toggle" id="side-toggle" type="button" aria-label="展开菜单"
+              aria-controls="nav" aria-expanded="false" title="展开菜单">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M4 12h16M4 17h16"></path>
+        </svg>
+      </button>
+
+      <!-- 面包屑：app.js 按路由渲染 -->
+      <nav class="crumb" id="crumb" aria-label="面包屑"></nav>
+
+      <!-- 健康徽章 + 内置浏览器状态（app.js 内部渲染） -->
+      <div class="health" id="health">
+        <span class="badge badge--pending"><i class="dot"></i>连接中…</span>
+      </div>
+    </header>
+
+    <!-- ===== 页面容器：全部内容由 app.js 渲染 ===== -->
+    <main id="app"></main>
+  </div>
+</div>
 
 <!-- ===== 右下角 toast 容器 ===== -->
 <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
