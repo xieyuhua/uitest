@@ -62,6 +62,22 @@ func TestMaskRequestBodyAndParams(t *testing.T) {
 	}
 }
 
+// 会话 ID 常见写法（sid / _sid / sessionid）要打码，但普通单词不能被误伤。
+func TestMaskIfSensitiveSessionID(t *testing.T) {
+	for _, name := range []string{"sid", "SID", "jsessionid", "PHPSESSID", "shop_sid", "x-sid"} {
+		got := maskIfSensitive(name, "abcdef1234567890")
+		if strings.Contains(got, "abcdef1234567890") {
+			t.Errorf("%s 是会话 ID，应打码, got %q", name, got)
+		}
+	}
+	for _, name := range []string{"consider", "resident", "page", "tenant"} {
+		got := maskIfSensitive(name, "abcdef1234567890")
+		if got != "abcdef1234567890" {
+			t.Errorf("%s 不是敏感参数，不该打码, got %q", name, got)
+		}
+	}
+}
+
 // 试抓详情里的请求 / 响应报文必须来自「真正发出去、收回来」的那一次请求。
 func TestFetchTraceRecordsRealRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

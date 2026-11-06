@@ -2692,6 +2692,12 @@ func isCookieAttr(name string) bool {
 // maskIfSensitive 按参数名判断要不要打码（query / JSON 字段 / 变量通用）。
 func maskIfSensitive(name, value string) string {
 	lk := strings.ToLower(strings.TrimSpace(name))
+	// 短名单独判：sid / _sid / -sid / jsessionid 这类会话 ID 很常见，
+	// 但 "sid" 又不能按子串匹配（consider、resident 都会被误伤）。
+	if lk == "sid" || strings.HasSuffix(lk, "_sid") || strings.HasSuffix(lk, "-sid") ||
+		strings.HasSuffix(lk, "sessionid") || strings.HasSuffix(lk, "sessid") {
+		return maskSecret(value)
+	}
 	for _, k := range []string{"token", "password", "passwd", "pwd", "secret", "sign",
 		"apikey", "api_key", "api-key", "access_key", "accesskey", "auth", "session", "ticket", "cookie"} {
 		if strings.Contains(lk, k) {
