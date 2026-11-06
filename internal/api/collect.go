@@ -761,6 +761,12 @@ func (s *Server) runPrelogin(w http.ResponseWriter, r *http.Request) {
 			out["token_preview"] = tokenPreview(token)
 		}
 	}
+	// 顺便把「登录后刷新公共参数」算一遍：直接看到最新 token / Cookie 到底是多少
+	if prev, perr := s.Collect.Harvester.RefreshSessionPreview(ctx, &t); perr == nil {
+		out["common_refresh"] = prev
+	} else {
+		out["common_refresh_error"] = perr.Error()
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1395,4 +1401,209 @@ func originOfFirst(eps []model.HarvestEndpoint) string {
 		}
 	}
 	return ""
+}
+
+/* ------------------------------------- 公共参数：粘贴导入 / 录制汇总 / 登录后刷新 */
+
+// commonSuggestReq 从录制结果汇总公共参数：给 capture_id + request_ids，
+// 或只给任务 id（用接口的 created_from 反查录制）。
+type commonSuggestReq struct {
+	CaptureID  string   `json:"capture_id,omitempty"`
+	RequestIDs []string `json:"request_ids,omitempty"`
+}
+
+// suggestCommon POST /api/collect/common/suggest —— 不绑定任务，建任务弹窗用。
+func (s *Server) suggestCommon(w http.ResponseWriter, r *http.Request) {
+	var req commonSuggestReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	entries, source, err := s.capturedEntries(nil, req.CaptureID, req.RequestIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sug := collect.SuggestCommonFromCaptured(entries)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"common":  collect.MergeCommonIntoSuggest(nil, sug),
+		"notes":   suggestNotes(sug),
+		"matched": len(entries),
+		"source":  source,
+	})
+}
+
+// suggestTaskCommon POST /api/collect/tasks/{id}/common/suggest —— 合并进任务已有的公共参数。
+func (s *Server) suggestTaskCommon(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var req commonSuggestReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	entries, source, err := s.capturedEntries(&t, req.CaptureID, req.RequestIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sug := collect.SuggestCommonFromCaptured(entries)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"common":  collect.MergeCommonIntoSuggest(t.Common, sug),
+		"notes":   suggestNotes(sug),
+		"matched": len(entries),
+		"source":  source,
+	})
+}
+
+// suggestNotes 汇总结果的说明；什么都没提取到时给一条能照做的提示。
+func suggestNotes(sug collect.CommonSuggest) []string {
+	if len(sug.Notes) > 0 {
+		return sug.Notes
+	}
+	return []string{"这次录制里没有找到「所有接口都一样」的参数：分页参数（page / offset / limit）不会汇总；" +
+		"可以手工填，或换个登录后的列表页重新录一次"}
+}
+
+// capturedEntries 按 capture_id + request_ids 取录制条目；
+// captureID 为空时用任务的 created_from 反查（服务重启后录制结果会清空）。
+func (s *Server) capturedEntries(task *model.HarvestTask, captureID string, requestIDs []string) ([]model.CapturedRequest, string, error) {
+	pick := map[string]bool{}
+	for _, id := range requestIDs {
+		if v := strings.TrimSpace(id); v != "" {
+			pick[v] = true
+		}
+	}
+	if cid := strings.TrimSpace(captureID); cid != "" {
+		list, ok, err := s.Collect.Recorder.Entries(cid)
+		if err != nil || !ok {
+			return nil, "", fmt.Errorf("录制会话不存在（服务重启后录制结果会清空，请重新录制一次）")
+		}
+		out := make([]model.CapturedRequest, 0, len(list))
+		for _, e := range list {
+			if len(pick) > 0 && !pick[e.ID] {
+				continue
+			}
+			out = append(out, e)
+		}
+		if len(out) == 0 {
+			return nil, "", fmt.Errorf("这个录制会话里没有勾选的请求，先回录制页重新勾选接口")
+		}
+		return out, fmt.Sprintf("录制会话 %s（%d 条请求）", cid, len(out)), nil
+	}
+	if task == nil {
+		return nil, "", fmt.Errorf("没有提供录制会话（capture_id），也没有任务可以用来反查")
+	}
+	want := map[string]bool{}
+	for _, ep := range task.Endpoints {
+		if v := strings.TrimSpace(ep.CreatedFrom); v != "" {
+			want[v] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil, "", fmt.Errorf("这个任务的接口没有录制来源（手工填的），没法从录制汇总；可以在「公共参数 → 粘贴导入」里直接贴 Cookie / 请求头")
+	}
+	var out []model.CapturedRequest
+	source := ""
+	for _, info := range s.Collect.Recorder.List() {
+		list, ok, err := s.Collect.Recorder.Entries(info.ID)
+		if err != nil || !ok {
+			continue
+		}
+		for _, e := range list {
+			if !want[e.ID] || (len(pick) > 0 && !pick[e.ID]) {
+				continue
+			}
+			if source == "" {
+				source = info.ID
+			}
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		return nil, "", fmt.Errorf("找不到这些接口的录制记录了（服务重启后录制结果会清空）；可以在「公共参数 → 粘贴导入」里直接贴 Cookie / 请求头")
+	}
+	return out, fmt.Sprintf("录制会话 %s（%d 条请求）", source, len(out)), nil
+}
+
+// importCommon POST /api/collect/common/import —— 只解析粘贴内容，不落库（建任务弹窗用）。
+func (s *Server) importCommon(w http.ResponseWriter, r *http.Request) {
+	var req collect.CommonImport
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	parsed, notes := collect.ParseCommonImport(req)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"common": collect.MergeCommonIntoSuggest(nil, commonSuggestOf(parsed)),
+		"notes":  notes,
+	})
+}
+
+// importTaskCommon POST /api/collect/tasks/{id}/common/import —— 解析后合并进任务已有的公共参数。
+func (s *Server) importTaskCommon(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var req collect.CommonImport
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	parsed, notes := collect.ParseCommonImport(req)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"common": collect.MergeCommonIntoSuggest(t.Common, commonSuggestOf(parsed)),
+		"notes":  notes,
+	})
+}
+
+// commonSuggestOf 把解析出的公共参数转成建议结构，复用「不覆盖已有值」的合并逻辑。
+func commonSuggestOf(c model.HarvestCommon) collect.CommonSuggest {
+	return collect.CommonSuggest{Params: c.Params, Headers: c.Headers, Cookies: c.Cookies, Bindings: c.Bindings}
+}
+
+type commonRefreshReq struct {
+	// RunPrelogin 先跑一遍前置登录再刷新（登录态最新）
+	RunPrelogin bool `json:"run_prelogin"`
+}
+
+// refreshTaskCommon POST /api/collect/tasks/{id}/common/refresh
+//
+// 按当前浏览器登录态刷新一次公共参数（只读，不保存任务配置）：
+// 返回脱敏后的参数 / Cookie / 绑定，以及"这次实际改了什么"。
+// 可选 run_prelogin=true，先跑一遍前置登录再取值。
+func (s *Server) refreshTaskCommon(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var req commonRefreshReq
+	_ = readJSON(r, &req)
+	ctx, cancel := timeoutCtx(r, 300*time.Second)
+	defer cancel()
+
+	out := map[string]any{"ok": true}
+	if req.RunPrelogin {
+		if perr := s.Collect.Harvester.RunPreloginNow(ctx, &t); perr != nil {
+			out["prelogin_error"] = perr.Error()
+		} else {
+			out["prelogin_ok"] = true
+		}
+	}
+	prev, rerr := s.Collect.Harvester.RefreshSessionPreview(ctx, &t)
+	if rerr != nil {
+		out["ok"] = false
+		out["error"] = rerr.Error()
+		out["hint"] = "先在「登录」页签跑一次前置登录，或在「公共参数 → 粘贴导入」里贴一份 Cookie"
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out["refresh"] = prev
+	writeJSON(w, http.StatusOK, out)
 }

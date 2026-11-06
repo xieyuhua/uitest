@@ -100,6 +100,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/collect/captures/{id}", s.deleteCapture)
 	mux.HandleFunc("DELETE /api/collect/captures", s.clearCaptures)
 	mux.HandleFunc("POST /api/collect/analyze", s.analyzeBody)
+	// 公共参数（不绑定任务：建任务弹窗里汇总 / 导入用）
+	mux.HandleFunc("POST /api/collect/common/suggest", s.suggestCommon)
+	mux.HandleFunc("POST /api/collect/common/import", s.importCommon)
 
 	mux.HandleFunc("GET /api/collect/tasks", s.listHarvestTasks)
 	mux.HandleFunc("POST /api/collect/tasks", s.createHarvestTask)
@@ -115,6 +118,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collect/tasks/{id}/test-notify", s.testHarvestNotify)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/token", s.taskToken)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/prelogin", s.runPrelogin)
+	// 公共参数：录制汇总 / 粘贴导入 / 登录后刷新
+	mux.HandleFunc("POST /api/collect/tasks/{id}/common/suggest", s.suggestTaskCommon)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/common/import", s.importTaskCommon)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/common/refresh", s.refreshTaskCommon)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/selftest", s.selftestTask)
 
 	// 数据写入：可复用的落库配置（新建 / 测试 / 保存 / 删除）
