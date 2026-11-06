@@ -261,16 +261,44 @@
         '录制时的 Authorization 早就过期了：默认连 User-Agent / X-* 一起换成浏览器的实时值') +
       '</div>' +
       '</div>' +
-      // 公共参数：所有接口共用，登录后的浏览器头 / 脚本会覆盖同名项
-      '<div class="ds-block"><div class="ds-block-title"><span>公共参数</span>' +
+      // 公共参数：所有接口共用；登录后的浏览器头 / 脚本会覆盖同名项
+      '<div class="ds-block" data-cm-block="' + pfx + '"><div class="ds-block-title"><span>公共参数</span>' +
       '<span class="muted">所有接口共用；URL / 请求体里的同名参数以接口自己为准</span></div>' +
+      '<div class="cm-toolbar">' +
+      '<button class="btn btn--sm" type="button" data-cm="import">粘贴导入（Cookie / Header / cURL）</button>' +
+      '<button class="btn btn--sm" type="button" data-cm="suggest">从录制汇总</button>' +
+      (pfx === 'tk' ? '<button class="btn btn--sm" type="button" data-cm="refresh">登录后刷新</button>' : '') +
+      '<span class="muted" data-cm-msg></span>' +
+      '</div>' +
       '<div class="form-grid">' +
       fld('公共查询参数 / 请求体字段（一行一个 key=value）',
         textareaHtml(pfx + '_cmparams', kvText(cm.params, '='), 4, 'placeholder=\'tenant_id=1001\ntoken={{env:API_TOKEN}}\''),
         'GET/DELETE：并进 URL 查询串；POST/PUT/PATCH：并进 JSON 请求体（接口自己已有同名参数时不覆盖）') +
       fld('公共请求头（一行一个 Name: Value）',
         textareaHtml(pfx + '_cmheaders', headersToText(cm.headers), 4, 'placeholder="X-Tenant: demo"'),
-        '前置登录后浏览器里真实在用的同名头会盖掉这里的值；Authorization / Cookie 一般不用写') +
+        '前置登录后浏览器里真实在用的同名头会盖掉这里的值；值里写了 {{变量}} 就反过来覆盖浏览器头（登录后的新 token 靠这个生效）') +
+      fld('公共 Cookie（一行一个 name=value）',
+        textareaHtml(pfx + '_cmcookies', kvText(cm.cookies, '='), 3, 'placeholder="SESSION=xxx"'),
+        '只作默认值：前置登录后浏览器里的同名 Cookie 会覆盖它；没有登录流程时也能拿它兜底') +
+      fld('参数绑定（一行一个：参数名 -> header:头名 / cookie:名 / query:名 / body:字段）',
+        textareaHtml(pfx + '_cmbindings', bindingsToText(cm.bindings), 3,
+          'placeholder=\'token -> header:Authorization = Bearer {{token}}\''),
+        '优先级最高：登录后刷新到的 token 靠它覆盖请求头；等号后面是值模板，省略时就是 {{参数名}}') +
+      '</div>' +
+      '<div class="cm-refresh">' +
+      '<label class="check-line"><input type="checkbox" id="' + pfx + '_cmrfon"' +
+      (cm.refresh && cm.refresh.enabled ? ' checked' : '') +
+      '> 登录后自动刷新公共参数（从浏览器请求头 / Cookie / 本地存储取最新值）</label>' +
+      '<div class="field-hint" style="margin:2px 0 8px">运行顺序：前置登录 → 导出浏览器会话 → 本刷新写入公共参数 → 参数绑定生效。' +
+      '典型用法：登录拿到的 token 写进参数 token，再配一条 token → header:Authorization 的绑定。</div>' +
+      '<div class="form-grid">' +
+      fld('token 写进哪个参数（留空默认 token）', inputHtml(pfx + '_cmrftoken', (cm.refresh && cm.refresh.token_param) || '', 'placeholder="token"')) +
+      fld('从哪个请求头取 token（留空自动找）', inputHtml(pfx + '_cmrfheader', (cm.refresh && cm.refresh.token_header) || '', 'placeholder="Authorization"')) +
+      fld('Cookie → 参数（一行一个 Cookie名=参数名）',
+        textareaHtml(pfx + '_cmrfcookies', kvText(cm.refresh && cm.refresh.cookies, '='), 3, 'placeholder="SESSION=sid"')) +
+      fld('浏览器存储 → 参数（一行一个 localStorage:key=参数名）',
+        textareaHtml(pfx + '_cmrfstorage', kvText(cm.refresh && cm.refresh.storage, '='), 3, 'placeholder="localStorage:token=token"')) +
+      '</div>' +
       '</div>' +
       fld('登录成功后执行的脚本（可选，返回 JSON）',
         textareaHtml(pfx + '_cmscript', cm.script || '', 4,
@@ -378,13 +406,224 @@
     };
   }
 
-  /** 公共参数：三样都空 = 没配（后端按 null 清掉） */
+  /** 公共参数：全空 = 没配（后端按 null 清掉） */
   function readCommonForm(root, pfx) {
     var params = parseKV(val(root, pfx + '_cmparams'), '=');
     var headers = textToHeaders(val(root, pfx + '_cmheaders'));
+    var cookies = parseKV(val(root, pfx + '_cmcookies'), '=');
+    var bindings = parseBindings(val(root, pfx + '_cmbindings'));
     var script = val(root, pfx + '_cmscript');
-    if (!Object.keys(params).length && !Object.keys(headers).length && !script) return null;
-    return { params: params, headers: headers, script: script };
+    var refresh = readRefreshForm(root, pfx);
+    if (!Object.keys(params).length && !Object.keys(headers).length && !Object.keys(cookies).length &&
+      !bindings.length && !script && !refresh) return null;
+    var out = { params: params, headers: headers, cookies: cookies, bindings: bindings, script: script };
+    if (refresh) out.refresh = refresh;
+    return out;
+  }
+
+  /** 参数绑定数组 → 多行文本：token -> header:Authorization = Bearer {{token}} */
+  function bindingsToText(list) {
+    if (!list || !list.length) return '';
+    return list.map(function (b) {
+      if (!b) return '';
+      return (b.param || '') + ' -> ' + (b.target || 'header') + ':' + (b.name || b.param || '') +
+        (b.template ? ' = ' + b.template : '');
+    }).filter(function (x) { return x; }).join('\n');
+  }
+
+  /** 多行文本 → 参数绑定：参数名 -> 目标:名称 [= 模板] */
+  function parseBindings(text) {
+    var out = [];
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var s = line.trim();
+      if (!s || s.charAt(0) === '#') return;
+      var i = s.indexOf('->');
+      if (i <= 0) return;
+      var param = s.slice(0, i).trim();
+      var rest = s.slice(i + 2).trim();
+      var tpl = '';
+      var eq = rest.indexOf('=');
+      if (eq >= 0) { tpl = rest.slice(eq + 1).trim(); rest = rest.slice(0, eq).trim(); }
+      var j = rest.indexOf(':');
+      var target = j >= 0 ? rest.slice(0, j).trim() : 'header';
+      var name = j >= 0 ? rest.slice(j + 1).trim() : rest;
+      if (!param || !name) return;
+      out.push({ param: param, target: target || 'header', name: name, template: tpl });
+    });
+    return out;
+  }
+
+  /** 登录后刷新配置：没勾选且没填任何东西就当没配 */
+  function readRefreshForm(root, pfx) {
+    var onEl = root.querySelector('#' + pfx + '_cmrfon');
+    var enabled = !!(onEl && onEl.checked);
+    var token = val(root, pfx + '_cmrftoken').trim();
+    var header = val(root, pfx + '_cmrfheader').trim();
+    var cookies = parseKV(val(root, pfx + '_cmrfcookies'), '=');
+    var storage = parseKV(val(root, pfx + '_cmrfstorage'), '=');
+    // 没勾选且没填任何项 = 没配置（后端按 null 清掉）
+    var rawToken = token;
+    if (!enabled && !rawToken && !header && !Object.keys(cookies).length && !Object.keys(storage).length) return null;
+    return { enabled: enabled, token_param: rawToken || 'token', token_header: header, cookies: cookies, storage: storage };
+  }
+
+  /** 接口返回的公共参数合并进表单（已有的值不覆盖，导入 / 汇总共用） */
+  function mergeCommonIntoForm(root, pfx, common) {
+    common = common || {};
+    var params = parseKV(val(root, pfx + '_cmparams'), '=');
+    var headers = textToHeaders(val(root, pfx + '_cmheaders'));
+    var cookies = parseKV(val(root, pfx + '_cmcookies'), '=');
+    var bindings = parseBindings(val(root, pfx + '_cmbindings'));
+    var mergeMap = function (dst, src) {
+      Object.keys(src || {}).forEach(function (k) {
+        if (k && !(k in dst)) dst[k] = src[k];
+      });
+    };
+    mergeMap(params, common.params);
+    mergeMap(headers, common.headers);
+    mergeMap(cookies, common.cookies);
+    (common.bindings || []).forEach(function (b) {
+      if (!b || !b.param) return;
+      var key = (b.target || 'header').toLowerCase() + ':' + String(b.name || b.param).toLowerCase();
+      var dup = bindings.some(function (x) {
+        return ((x.target || 'header').toLowerCase() + ':' + String(x.name || '').toLowerCase()) === key;
+      });
+      if (!dup) bindings.push(b);
+    });
+    var set = function (id, v) { var el = root.querySelector('#' + id); if (el) el.value = v || ''; };
+    set(pfx + '_cmparams', kvText(params, '='));
+    set(pfx + '_cmheaders', headersToText(headers));
+    set(pfx + '_cmcookies', kvText(cookies, '='));
+    set(pfx + '_cmbindings', bindingsToText(bindings));
+  }
+
+  /** 公共参数工具条：粘贴导入 / 从录制汇总 / 登录后刷新（建任务弹窗与任务详情共用） */
+  function bindCommonActions(root, pfx, ctx) {
+    ctx = ctx || {};
+    var block = root.querySelector('[data-cm-block="' + pfx + '"]');
+    if (!block || block.getAttribute('data-cm-bound') === '1') return;
+    block.setAttribute('data-cm-bound', '1');
+    var msg = block.querySelector('[data-cm-msg]');
+    function say(text, isErr) {
+      if (!msg) { if (text) toast(text, isErr ? 'error' : 'info'); return; }
+      msg.textContent = text || '';
+      msg.style.color = isErr ? 'var(--red)' : '';
+    }
+    block.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-cm]') : null;
+      if (!btn) return;
+      var act = btn.getAttribute('data-cm');
+      if (act === 'import') { openCommonImportModal(root, pfx, ctx, say); return; }
+      if (act === 'suggest') { runCommonSuggest(root, pfx, ctx, say); return; }
+      if (act === 'refresh') { runCommonRefresh(ctx, say); return; }
+    });
+  }
+
+  /** 粘贴导入弹窗：Cookie / Header / 参数 / cURL 任填一项 */
+  function openCommonImportModal(root, pfx, ctx, say) {
+    var body = '<div class="alert alert--info" style="margin:0 0 10px">' +
+      '把浏览器开发者工具里复制的内容直接粘进来：Cookie、请求头、参数或整条 cURL 任填一项即可。' +
+      '解析结果会<strong>合并</strong>进公共参数（已有值不覆盖），点「保存配置」才真正生效。</div>' +
+      '<div class="form-grid">' +
+      fld('Cookie（整段 a=b; c=d 也行）', textareaHtml('ci_cookie', '', 3, 'placeholder="SESSION=xxx; token=yyy"')) +
+      fld('请求头（一行一个 Name: Value）', textareaHtml('ci_headers', '', 4, 'placeholder="Authorization: Bearer xxx"')) +
+      fld('参数（JSON / a=1&amp;b=2 / 一行一个 key=value）', textareaHtml('ci_params', '', 3, 'placeholder="tenant_id=1001"')) +
+      fld('cURL（可选，整条粘进来）', textareaHtml('ci_curl', '', 4,
+        'placeholder="curl \'https://api.example.com/x\' -H \'Authorization: Bearer yyy\'"')) +
+      '</div>';
+    var m = U().openModal({
+      title: '粘贴导入会话参数', width: 760, body: body,
+      footer: '<button class="btn" data-modal-close>取消</button>' +
+        '<button class="btn btn--primary" id="ci_do">解析并填入</button>'
+    });
+    m.overlay.querySelector('#ci_do').addEventListener('click', function () {
+      var payload = {
+        cookie: val(m.overlay, 'ci_cookie'),
+        headers: val(m.overlay, 'ci_headers'),
+        params: val(m.overlay, 'ci_params'),
+        curl: val(m.overlay, 'ci_curl')
+      };
+      if (!payload.cookie && !payload.headers && !payload.params && !payload.curl) {
+        toast('先粘一点内容进来', 'error');
+        return;
+      }
+      var url = ctx.taskId
+        ? '/api/collect/tasks/' + encodeURIComponent(ctx.taskId) + '/common/import'
+        : '/api/collect/common/import';
+      api('POST', url, payload).then(function (res) {
+        mergeCommonIntoForm(root, pfx, res.common || {});
+        var notes = res.notes || [];
+        m.close();
+        say(notes.length ? notes.join('；') : '已导入，记得点「保存配置」', false);
+        toast('已填入公共参数，别忘了保存', 'success');
+      }).catch(function () { });
+    });
+  }
+
+  /** 从录制结果汇总公共参数（建任务弹窗用 capture_id，任务详情用 created_from 反查） */
+  function runCommonSuggest(root, pfx, ctx, say) {
+    var payload = {};
+    if (ctx.captureId) payload.capture_id = ctx.captureId;
+    if (ctx.requestIds && ctx.requestIds.length) payload.request_ids = ctx.requestIds;
+    var url = ctx.taskId
+      ? '/api/collect/tasks/' + encodeURIComponent(ctx.taskId) + '/common/suggest'
+      : '/api/collect/common/suggest';
+    say('正在从录制结果汇总…', false);
+    api('POST', url, payload).then(function (res) {
+      mergeCommonIntoForm(root, pfx, res.common || {});
+      var notes = (res.notes || []).slice();
+      if (res.source) notes.unshift(res.source);
+      say(notes.join('；') || '汇总完成，记得点「保存配置」', false);
+      toast('已填入公共参数，别忘了保存', 'success');
+    }).catch(function () { say('', true); });
+  }
+
+  /** 登录后刷新公共参数（只读，不保存配置） */
+  function runCommonRefresh(ctx, say) {
+    if (!ctx.taskId) return;
+    say('正在按当前登录态刷新（会重新导出浏览器会话）…', false);
+    api('POST', '/api/collect/tasks/' + encodeURIComponent(ctx.taskId) + '/common/refresh', {})
+      .then(function (res) {
+        if (!res.ok) { say(res.error || '刷新失败', true); return; }
+        var rf = res.refresh || {};
+        var lines = [];
+        if (rf.session) lines.push(rf.session);
+        if (rf.applied && rf.applied.length) lines.push('本次更新：' + rf.applied.join('、'));
+        if (rf.params && Object.keys(rf.params).length) {
+          lines.push('参数：' + Object.keys(rf.params).map(function (k) { return k + '=' + rf.params[k]; }).join('，'));
+        }
+        (rf.notes || []).forEach(function (n) { lines.push(n); });
+        say(lines.join('；') || '刷新完成', false);
+        U().openModal({
+          title: '登录后刷新结果（敏感值已脱敏）', width: 760,
+          body: refreshResultHtml(rf),
+          footer: '<button class="btn" data-modal-close>关闭</button>'
+        });
+      }).catch(function () { say('', true); });
+  }
+
+  /** 「登录后刷新」结果弹窗：参数 / Cookie / 请求头 / 绑定都是脱敏值 */
+  function refreshResultHtml(rf) {
+    rf = rf || {};
+    var html = '<div class="alert alert--info" style="margin:0 0 10px">' + esc(rf.session || '登录态摘要不可用') + '</div>';
+    if ((rf.applied || []).length) {
+      html += '<div class="pv-section-title">本次更新</div><div class="chips">' +
+        rf.applied.map(function (x) { return '<span class="chip">' + esc(x) + '</span>'; }).join('') + '</div>';
+    }
+    if (rf.params) html += '<div class="pv-section-title">公共参数（脱敏）</div>' + pvKVHtml(rf.params);
+    if (rf.bindings && rf.bindings.length) {
+      html += '<div class="pv-section-title">生效的参数绑定</div><div class="chips">' +
+        rf.bindings.map(function (b) {
+          return '<span class="chip">' + esc((b.param || '') + ' → ' + (b.target || 'header') + ':' + (b.name || '') +
+            (b.template ? ' = ' + b.template : '')) + '</span>';
+        }).join('') + '</div>';
+    }
+    if (rf.cookies) html += pvDetailsHtml('Cookie（' + Object.keys(rf.cookies).length + ' 个，已脱敏）', pvKVHtml(rf.cookies));
+    if (rf.headers) html += pvDetailsHtml('浏览器登录态请求头（已脱敏）', pvKVHtml(rf.headers));
+    (rf.notes || []).forEach(function (n) {
+      html += '<div class="alert alert--warn" style="margin:6px 0">' + esc(n) + '</div>';
+    });
+    return html;
   }
 
   /** 前置登录（UI 自动化）：没选录制就当作没配 */
@@ -1577,6 +1816,7 @@
         footer: '<button class="btn" data-modal-close>取消</button>' +
           '<button class="btn btn--primary" id="t_save">创建任务</button>'
       });
+      bindCommonActions(m.overlay, 't', { captureId: captureId, requestIds: requestIds });
       loadRecordings().then(function () { refreshRecSelects(m.overlay); }).catch(function () { });
 
       m.overlay.querySelector('#t_save').addEventListener('click', function () {
@@ -1658,7 +1898,7 @@
         // 分区页签：不再一页长表单
         '<nav class="tk-tabs" id="tk-tabs">' +
         tabBtn('overview', '概览', '任务名称 / 说明 / 起始页') +
-        tabBtn('common', '公共参数', '所有接口共用的 query/body 参数、请求头、登录后脚本') +
+        tabBtn('common', '公共参数', '所有接口共用的 query/body 参数、请求头、Cookie、参数绑定、登录后刷新') +
         tabBtn('login', '登录', '前置登录（UI 自动化）+ 浏览器会话共享') +
         tabBtn('eps', '接口设计', '每个接口的方法 / URL / 分页 / 请求头 / 请求体 / 字段映射') +
         tabBtn('runtime', '调度与落库', '定时、限速、写入目标') +
@@ -1743,6 +1983,9 @@
         });
         show(state.tkTab || 'overview');
       })();
+
+      // 公共参数工具条：粘贴导入 / 从录制汇总 / 登录后刷新
+      bindCommonActions(host, 'tk', { taskId: state.id });
 
       // 「登录流程录制」下拉需要录制列表：异步补一次（只拉一次）
       loadRecordings().then(function () { refreshRecSelects(host); }).catch(function () { });

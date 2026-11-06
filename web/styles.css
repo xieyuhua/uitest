@@ -979,3 +979,9 @@ tbody tr.is-selected{ background:#f5f5ff; }
   display:flex; align-items:center; gap:10px; flex-wrap:wrap;
   background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px;
 }
+
+/* ------------------------------------------- 公共参数工具条 / 登录后刷新配置 */
+.cm-toolbar{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:2px 0 10px; }
+.cm-toolbar .muted{ font-size:12px; line-height:1.5; }
+.cm-refresh{ margin:4px 0 8px; padding:10px 12px; border:1px dashed var(--border-2); border-radius:var(--radius-sm); background:var(--bg); }
+.cm-refresh .form-grid{ margin-top:8px; }
