@@ -388,11 +388,19 @@ func ParseCommonImport(in CommonImport) (model.HarvestCommon, []string) {
 	}
 	if strings.TrimSpace(in.Params) != "" {
 		params := parseParamText(in.Params)
+		var paging int
 		for k, v := range params {
+			if isPagingParam(k) {
+				paging++
+				continue
+			}
 			out.Params = putKV(out.Params, k, v)
 		}
-		if len(params) > 0 {
-			notes = append(notes, "导入 query/body 参数 "+itoa(len(params))+" 个")
+		if len(params)-paging > 0 {
+			notes = append(notes, "导入 query/body 参数 "+itoa(len(params)-paging)+" 个")
+		}
+		if paging > 0 {
+			notes = append(notes, "已跳过分页参数 "+itoa(paging)+" 个（page / offset / limit 等固化成公共参数会挡住接口自己翻页）")
 		}
 	}
 	out.Normalize()
