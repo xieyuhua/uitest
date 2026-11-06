@@ -269,6 +269,8 @@ func (h *Harvester) execute(ctx context.Context, runID string) {
 			len(sess.params), varKeysText(sess.params),
 			len(sess.commonHeaders), varKeysText(sess.commonHeaders))
 	}
+	// 登录后把最新 token / Cookie / 浏览器存储值刷进公共参数（参数绑定随后每次请求生效）
+	h.applySessionRefresh(ctx, runID, &task, &sess)
 	if task.Common != nil && strings.TrimSpace(task.Common.Script) != "" {
 		h.runCommonScript(ctx, runID, &task, &sess)
 	}
@@ -426,6 +428,7 @@ func (h *Harvester) collectEndpoint(ctx context.Context, runID string, task *mod
 			}
 			h.invalidateSession(task)
 			if fresh, serr := h.resolveSession(ctx, task); serr == nil {
+				h.applySessionRefresh(ctx, runID, task, &fresh)
 				sess = fresh
 				setJarCookies(client.Jar, sess)
 			} else {
@@ -704,6 +707,12 @@ type resolvedSession struct {
 	params map[string]string
 	// 任务级公共请求头（浏览器共享的同名头会盖掉它）
 	commonHeaders map[string]string
+	// 公共 Cookie：导入 / 录制汇总而来，只作默认值（浏览器同名 Cookie 优先）
+	commonCookies map[string]string
+	// 公共参数绑定（header / cookie / query / body），请求时优先级最高
+	bindings []model.HarvestParamBinding
+	// 本次任务涉及的站点 origin（种 Cookie 用）
+	origins []string
 	// token 型站点（后端兼容保留，界面已不再提供入口）
 	token       string
 	tokenHeader string
@@ -731,10 +740,53 @@ func (h *Harvester) newClient(th model.HarvestThrottle, sess resolvedSession) *h
 }
 
 // setJarCookies 把会话里的 Cookie 灌进 jar（新建客户端、刷新会话都用它）。
+//
+// 顺序（后者覆盖同名 Cookie）：
+//  1. 公共 Cookie（导入 / 录制汇总）——默认值；
+//  2. 前置登录后从浏览器导出的 Cookie——永远是最新登录态；
+//  3. 参数绑定到 Cookie 的值——显式配置，最高优先级。
 func setJarCookies(jar http.CookieJar, sess resolvedSession) {
 	if jar == nil {
 		return
 	}
+	origins := append([]string(nil), sess.origins...)
+	seen := map[string]bool{}
+	for _, o := range origins {
+		seen[o] = true
+	}
+	for origin := range sess.cookies {
+		if !seen[origin] {
+			seen[origin] = true
+			origins = append(origins, origin)
+		}
+	}
+	if len(origins) == 0 {
+		return
+	}
+	setAll := func(values map[string]string) {
+		if len(values) == 0 {
+			return
+		}
+		names := sortedStringKeys(values)
+		for _, origin := range origins {
+			u, err := url.Parse(origin)
+			if err != nil || u.Scheme == "" {
+				continue
+			}
+			list := make([]*http.Cookie, 0, len(names))
+			for _, name := range names {
+				if v := strings.TrimSpace(values[name]); v != "" {
+					list = append(list, &http.Cookie{Name: name, Value: v, Path: "/"})
+				}
+			}
+			if len(list) > 0 {
+				jar.SetCookies(u, list)
+			}
+		}
+	}
+	// 1) 公共 Cookie（默认值）
+	setAll(sess.commonCookies)
+	// 2) 浏览器里的登录 Cookie（覆盖同名）
 	for origin, list := range sess.cookies {
 		u, err := url.Parse(origin)
 		if err != nil || u.Scheme == "" {
@@ -742,6 +794,8 @@ func setJarCookies(jar http.CookieJar, sess resolvedSession) {
 		}
 		jar.SetCookies(u, list)
 	}
+	// 3) 参数绑定写 Cookie（显式最高优先级）
+	setAll(cookieBindingValues(sess))
 }
 
 // sessionScaffold 空会话骨架：带上 UA / Referer / 公共参数（其余字段靠浏览器导出填）。
@@ -764,7 +818,10 @@ func sessionScaffold(task *model.HarvestTask) resolvedSession {
 		for k, v := range task.Common.Headers {
 			sess.commonHeaders[k] = v
 		}
+		sess.commonCookies = cloneStringMap(task.Common.Cookies)
+		sess.bindings = append([]model.HarvestParamBinding(nil), task.Common.Bindings...)
 	}
+	sess.origins = TaskOrigins(task)
 	return sess
 }
 
@@ -792,18 +849,27 @@ func (h *Harvester) resolveSession(ctx context.Context, task *model.HarvestTask)
 
 	list, err := h.browserCookies(ctx, target, urls)
 	if err != nil {
+		// 导入的公共 Cookie 也能当登录态用：没有浏览器会话时不直接失败
+		if len(sess.commonCookies) > 0 {
+			sess.cookieCount = len(sess.commonCookies)
+			return sess, nil
+		}
 		return sess, err
 	}
 	if len(list) == 0 {
-		return sess, fmt.Errorf("内置浏览器里没有 %s 的登录 Cookie（按 %s 取）：配一个「前置登录（UI 自动化）」把浏览器登进去，"+
-			"或先在内置浏览器里手动登录一次", target, strings.Join(urls, "、"))
+		if len(sess.commonCookies) > 0 {
+			sess.cookieCount = len(sess.commonCookies)
+			return sess, nil
+		}
+		return sess, fmt.Errorf("内置浏览器里没有 %s 的登录 Cookie（按 %s 取）：配一个「前置登录（UI 自动化）」把浏览器登进去，或先在内置浏览器里手动登录一次；"+
+			"也可以在「公共参数 → 导入会话参数」里直接粘贴 Cookie", target, strings.Join(urls, "、"))
 	}
 	for _, ep := range task.Endpoints {
 		if o := originOf(ep.URL); o != "" {
 			addCookies(sess.cookies, o, list)
 		}
 	}
-	sess.cookieCount = len(list)
+	sess.cookieCount = len(list) + len(sess.commonCookies)
 	// 再把浏览器里"真实在用的"请求头抄一份：录制时存下的 Authorization / X-Token 已经过期了
 	if hd := h.sniffSessionHeaders(ctx, task, target, urls); len(hd) > 0 {
 		sess.headers = hd
@@ -893,10 +959,10 @@ func (h *Harvester) invalidateSession(task *model.HarvestTask) {
 	}
 }
 
-// mergeCommonParams 把任务级公共参数并进这次请求：
+// mergeCommonParamsOnly 把任务级公共参数并进这次请求：
 // GET/DELETE/HEAD 进 URL 查询串；POST/PUT/PATCH 并进 JSON 请求体。
 // 接口自己（或分页）已经给了同名参数时以接口为准。
-func mergeCommonParams(ep model.HarvestEndpoint, target, body string, sess resolvedSession) (string, string) {
+func mergeCommonParamsOnly(ep model.HarvestEndpoint, target, body string, sess resolvedSession) (string, string) {
 	if len(sess.params) == 0 {
 		return target, body
 	}
@@ -948,6 +1014,12 @@ func mergeCommonParams(ep model.HarvestEndpoint, target, body string, sess resol
 		return target, body
 	}
 	return target, string(b)
+}
+
+// mergeCommonParams 先并入公共参数（接口同名参数优先），再应用 query / body 参数绑定（绑定优先）。
+func mergeCommonParams(ep model.HarvestEndpoint, target, body string, sess resolvedSession) (string, string) {
+	target, body = mergeCommonParamsOnly(ep, target, body, sess)
+	return applyQueryBodyBindings(target, body, sess)
 }
 
 // runCommonScript 登录成功后在内置浏览器里跑「公共参数脚本」，把返回值并进公共参数 / 请求头。
@@ -2227,7 +2299,8 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		sess = sessionScaffold(&task)
 		warning = "没拿到登录态（" + sessErr.Error() + "）；下面按无登录态试抓，返回 401/403 说明这个接口需要登录"
 	}
-	// 与正式运行保持一致：先把「登录后脚本」跑一遍，否则试抓看不到脚本注入的参数
+	// 与正式运行保持一致：先刷新公共参数，再跑「登录后脚本」
+	refreshed := h.applySessionRefresh(ctx, "", &task, &sess)
 	scriptRan := false
 	if task.Common != nil && strings.TrimSpace(task.Common.Script) != "" {
 		h.runCommonScript(ctx, "", &task, &sess)
@@ -2248,6 +2321,18 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 	if len(sess.params) > 0 {
 		prep = append(prep, fmt.Sprintf("公共参数：%d 个（%s）；GET/DELETE 进 query，POST/PUT/PATCH 进 JSON 请求体",
 			len(sess.params), strings.Join(sortedStringKeys(sess.params), "、")))
+	}
+	if len(refreshed) > 0 {
+		prep = append(prep, "登录后刷新公共参数："+strings.Join(refreshed, "、"))
+	}
+	if len(sess.bindings) > 0 {
+		var names []string
+		for _, b := range sess.bindings {
+			e := b.Effective()
+			names = append(names, e.Target+":"+e.Name)
+		}
+		sort.Strings(names)
+		prep = append(prep, "参数绑定："+strings.Join(names, "、"))
 	}
 	if task.Common != nil && strings.TrimSpace(task.Common.Script) != "" {
 		if scriptRan {
@@ -2974,6 +3059,25 @@ func effectiveHeaders(ep model.HarvestEndpoint, sess resolvedSession) http.Heade
 				continue
 			}
 			out.Set(k, keepScheme(out.Get(k), want))
+		}
+	}
+	// 4) 公共请求头里写了 {{变量}} 的：视为显式指定，优先级高于浏览器实时头
+	for k, v := range sess.commonHeaders {
+		if !strings.Contains(v, "{{") {
+			continue
+		}
+		if val := strings.TrimSpace(expand(v, vars)); val != "" {
+			out.Set(k, val)
+		}
+	}
+	// 5) 参数绑定（header）：最高优先级。登录后刷新到的 token 就靠它覆盖旧头
+	for _, b := range sess.bindings {
+		e := b.Effective()
+		if e.Target != "header" {
+			continue
+		}
+		if val := strings.TrimSpace(expand(e.Template, vars)); val != "" {
+			out.Set(e.Name, val)
 		}
 	}
 	return out

@@ -558,17 +558,162 @@ func (t HarvestToken) Enabled() bool {
 //
 // 优先级（后者覆盖前者）：
 //
-//	公共参数 → 接口自己的 URL / 请求头 / 请求体 → 前置登录后的浏览器请求头 → 登录后脚本
+//	公共参数 → 接口自己的 URL / 请求头 / 请求体 → 公共 Cookie（导入 / 录制汇总）
+//	→ 前置登录后的浏览器 Cookie / 请求头 → 写了 {{变量}} 的公共请求头 → 参数绑定 → 登录后脚本
+//
+// 两个「显式」开关用来解决"登录后拿到的新 token 一定要生效"：
+//   - 公共请求头里写了 {{token}} 视为显式，浏览器里的旧头盖不掉它；
+//   - Bindings（参数绑定）优先级最高，可直接把参数写进 header / cookie / query / body。
 type HarvestCommon struct {
-	// Params 公共参数：GET/DELETE 进 URL query，POST/PUT/PATCH 进 JSON 请求体
+	// Params 公共参数：GET/DELETE 进 URL query，POST/PUT/PATCH 进 JSON 请求体；
+	// 也可以被 URL / 请求头 / 请求体里的 {{变量名}} 引用。
 	Params map[string]string `json:"params,omitempty"`
-	// Headers 公共请求头（浏览器共享的同名头会覆盖它）
+	// Headers 公共请求头（浏览器共享的同名头会覆盖它；需要"一定生效"请在值里写 {{变量}} 或用 Bindings）
 	Headers map[string]string `json:"headers,omitempty"`
+	// Cookies 公共 Cookie：导入或从录制汇总而来。运行时先种进 Cookie jar，
+	// 前置登录后浏览器里的同名 Cookie 会覆盖它（浏览器永远是最新登录态）。
+	Cookies map[string]string `json:"cookies,omitempty"`
+	// Bindings 参数绑定：把公共参数的值写进请求头 / Cookie / query / 请求体，优先级最高。
+	Bindings []HarvestParamBinding `json:"bindings,omitempty"`
+	// Refresh 登录后自动刷新公共参数（从浏览器请求头 / Cookie / localStorage 取值）
+	Refresh *HarvestSessionRefresh `json:"refresh,omitempty"`
 	// Script 登录成功后在内置浏览器里执行的脚本，返回值是 JSON：
 	//   {"params":{"token":"…"},"headers":{"X-Token":"…"}}
 	//   {"token":"…"}  → 自动写成 Authorization: Bearer <token>
 	// 可以读 localStorage / cookie / 页面变量，用来把登录结果灌进公共参数。
 	Script string `json:"script,omitempty"`
+}
+
+// HarvestParamBinding 公共参数 → 请求位置的绑定。
+//
+// 典型场景：登录拿到 token 后，用它替换请求头里的 Authorization：
+//
+//	{Param: "token", Target: "header", Name: "Authorization", Template: "Bearer {{token}}"}
+//
+// Template 不填时默认 {{param}}，支持 {{参数名}} / {{env:XXX}} 等变量。
+type HarvestParamBinding struct {
+	// Param 公共参数名（参数的值来自登录后刷新 / 脚本 / 手动填写）
+	Param string `json:"param"`
+	// Target 写到哪里：header | cookie | query | body
+	Target string `json:"target,omitempty"`
+	// Name 目标名称：请求头名 / Cookie 名 / query 参数名 / 请求体字段名
+	Name string `json:"name,omitempty"`
+	// Template 值模板，默认 "{{参数名}}"；如 "Bearer {{token}}"
+	Template string `json:"template,omitempty"`
+}
+
+// Effective 归一化绑定：target 小写、默认 Name / Template。
+func (b HarvestParamBinding) Effective() HarvestParamBinding {
+	out := b
+	out.Param = strings.TrimSpace(out.Param)
+	out.Name = strings.TrimSpace(out.Name)
+	out.Target = strings.ToLower(strings.TrimSpace(out.Target))
+	switch out.Target {
+	case "", "header", "headers":
+		out.Target = "header"
+	case "cookie", "cookies":
+		out.Target = "cookie"
+	case "query", "url", "param", "params":
+		out.Target = "query"
+	case "body", "json", "form":
+		out.Target = "body"
+	}
+	if out.Name == "" {
+		out.Name = out.Param
+	}
+	if strings.TrimSpace(out.Template) == "" && out.Param != "" {
+		out.Template = "{{" + out.Param + "}}"
+	}
+	return out
+}
+
+// Valid 绑定是否可用（参数名与目标名都不能为空）。
+func (b HarvestParamBinding) Valid() bool {
+	e := b.Effective()
+	return e.Param != "" && e.Name != ""
+}
+
+// HarvestSessionRefresh 登录后自动刷新公共参数。
+//
+// 典型用法（token 站点）：Enabled=true、TokenParam="token"，
+// 再配一条 token → header:Authorization 的绑定（或直接打开自动绑定）。
+// 运行顺序：前置登录 → 导出浏览器 Cookie / 请求头 → 本刷新写入公共参数 → 参数绑定生效。
+type HarvestSessionRefresh struct {
+	Enabled bool `json:"enabled"`
+	// TokenParam 把浏览器实际使用的登录 token 写进这个公共参数（默认 token）
+	TokenParam string `json:"token_param,omitempty"`
+	// TokenHeader 从哪个请求头取 token；留空自动按 Authorization / *token* / *auth* 找
+	TokenHeader string `json:"token_header,omitempty"`
+	// Cookies Cookie 名 → 公共参数名（如 SESSION=sid）
+	Cookies map[string]string `json:"cookies,omitempty"`
+	// Storage 浏览器存储 → 公共参数名，键名格式 localStorage:key / sessionStorage:key
+	Storage map[string]string `json:"storage,omitempty"`
+}
+
+// Effective 填默认值。
+func (r *HarvestSessionRefresh) Effective() HarvestSessionRefresh {
+	if r == nil {
+		return HarvestSessionRefresh{}
+	}
+	out := *r
+	out.TokenParam = strings.TrimSpace(out.TokenParam)
+	if out.TokenParam == "" {
+		out.TokenParam = "token"
+	}
+	out.TokenHeader = strings.TrimSpace(out.TokenHeader)
+	return out
+}
+
+// Active 是否启用登录后刷新。
+func (r *HarvestSessionRefresh) Active() bool {
+	return r != nil && r.Enabled
+}
+
+// Normalize 清理公共参数：去空键、去无效/重复绑定、补默认值。
+func (c *HarvestCommon) Normalize() {
+	if c == nil {
+		return
+	}
+	c.Params = cleanKV(c.Params)
+	c.Headers = cleanKV(c.Headers)
+	c.Cookies = cleanKV(c.Cookies)
+	if len(c.Bindings) > 0 {
+		out := make([]HarvestParamBinding, 0, len(c.Bindings))
+		seen := map[string]bool{}
+		for _, b := range c.Bindings {
+			e := b.Effective()
+			if !e.Valid() {
+				continue
+			}
+			key := e.Target + "|" + strings.ToLower(e.Name) + "|" + e.Param
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, e)
+		}
+		c.Bindings = out
+	}
+	if c.Refresh != nil {
+		rf := c.Refresh.Effective()
+		c.Refresh = &rf
+	}
+}
+
+// cleanKV 去掉 key / value 两端的空白，丢掉空 key。
+func cleanKV(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // HarvestTask 一个定时采集任务。
@@ -671,17 +816,15 @@ func (t HarvestTask) Clone() HarvestTask {
 	}
 	if t.Common != nil {
 		cm := *t.Common
-		if t.Common.Params != nil {
-			cm.Params = make(map[string]string, len(t.Common.Params))
-			for k, v := range t.Common.Params {
-				cm.Params[k] = v
-			}
-		}
-		if t.Common.Headers != nil {
-			cm.Headers = make(map[string]string, len(t.Common.Headers))
-			for k, v := range t.Common.Headers {
-				cm.Headers[k] = v
-			}
+		cm.Params = cloneMap(t.Common.Params)
+		cm.Headers = cloneMap(t.Common.Headers)
+		cm.Cookies = cloneMap(t.Common.Cookies)
+		cm.Bindings = append([]HarvestParamBinding(nil), t.Common.Bindings...)
+		if t.Common.Refresh != nil {
+			rf := *t.Common.Refresh
+			rf.Cookies = cloneMap(t.Common.Refresh.Cookies)
+			rf.Storage = cloneMap(t.Common.Refresh.Storage)
+			cm.Refresh = &rf
 		}
 		c.Common = &cm
 	}
@@ -947,4 +1090,19 @@ func (t *HarvestTask) Normalize() {
 		}
 		e.Pagination = e.Pagination.Effective()
 	}
+	if t.Common != nil {
+		t.Common.Normalize()
+	}
+}
+
+// cloneMap 复制 string map（nil 保持 nil）。
+func cloneMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
