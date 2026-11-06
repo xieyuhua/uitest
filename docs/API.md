@@ -253,7 +253,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | `session` | `{host, header_mode}`；会话只有一种——内置浏览器登录态：抓取时 Cookie 与请求头全部来自浏览器（先跑前置登录），只有 URL / 请求体按接口配置。`host` 留空 = 起始页/第一个接口的 origin；`header_mode`：`all`（默认，除 `Content-Type`/`Content-Length`/`Cookie` 这类请求参数外全部共享）/ `auth`（只共享鉴权头）/ `off`（只用录制值）。老字段 `mode`/`cookie`/`user_agent`/`referer`/`token` 仍可读入，运行时一律按浏览器会话处理 |
 | `prelogin` | 可选：`{enabled, recording_id, recording_name, mode: always\|on-fail, timeout_seconds, continue_on_error, vars}`；运行前先回放一段 UI 自动化（登录）再导出会话；`vars` 是登录流程的数据（密码框录制时脱敏成 `{{password}}`，必须用 `vars.password` 注入） |
 | `notify` | **（已废弃，改用系统设置）** 通知现在统一在「设置 → 运行通知」里配：`PUT /api/settings` 的 `notify = {enabled, webhook, on_success, on_failure, mentioned[], base_url}` |
-| `common` | 公共参数：`{params:{k:v}, headers:{k:v}, script}`。`params` GET/DELETE 进 query、POST/PUT/PATCH 并进 JSON body；`headers` 会被前置登录后的浏览器同名头覆盖；`script` 在登录后的浏览器页面里执行，返回 JSON（`{"params":{…},"headers":{…}}` 或 `{"token":"…"}`）。优先级：公共参数 → 接口配置 → 浏览器头 → 脚本 |
+| `common` | 公共参数（会话参数）：`{params:{k:v}, headers:{k:v}, cookies:{k:v}, bindings:[{param,target,name,template}], refresh:{enabled,token_param,token_header,cookies:{Cookie名:参数名},storage:{localStorage:key:参数名}}, script}`。`params` GET/DELETE 进 query、POST/PUT/PATCH 并进 JSON body；`cookies` 只是默认值（前置登录后浏览器里的同名 Cookie 优先）；`headers` 里写了 `{{变量}}` 就反过来覆盖浏览器实时头；`bindings` 优先级最高，把参数写进 `header` / `cookie` / `query` / `body`（`template` 省略即 `{{param}}`）；`refresh` 在前置登录之后从浏览器实时请求头 / Cookie / localStorage / sessionStorage 取最新值写进参数（取到 token 的头会自动补一条参数绑定）；`script` 在登录后的浏览器页面里执行，返回 JSON（`{"params":{…},"headers":{…}}` 或 `{"token":"…"}`）。优先级：公共参数 → 接口配置 → 公共 Cookie → 浏览器 Cookie / 请求头 → 含 `{{变量}}` 的公共请求头 → 参数绑定 → 登录后脚本 |
 | `status` | `active` / `paused` |
 | `next_run_at` / `last_run_at` / `last_status` / `last_written` / `run_count` / `fail_streak` / `schedule_text` / `sink_file` | 服务端维护 |
 
@@ -311,6 +311,8 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | POST | `/api/collect/captures/{id}/analyze` | 分析某条请求：`{request_id}` → `{records_path, records, fields[], columns[], rows[], pagination, pagination_text}` |
 | DELETE | `/api/collect/captures/{id}` | 关闭标签页并丢弃这次录制结果 |
 | POST | `/api/collect/analyze` | 直接分析一段响应体：`{body, records_path}` |
+| POST | `/api/collect/common/suggest` | 建任务弹窗用（不绑定任务）：从录制结果汇总公共参数，`{capture_id, request_ids[]}` → `{common, notes[], matched, source}`，见下方示例 |
+| POST | `/api/collect/common/import` | 建任务弹窗用：解析粘贴的 Cookie / Header / 参数 / cURL，`{cookie, headers, params, curl}` → `{common, notes[]}` |
 
 **任务**
 
@@ -322,7 +324,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | PATCH | `/api/collect/tasks/{id}` | 局部更新：`name/description/start_url/status/schedule/throttle/sink/session/endpoints`，以及 `split_by_endpoint`（每接口分表）/ `sink_profile_id`；`endpoints[].sink` 可给单个接口单独指定 `{"table":"..."}` |
 | DELETE | `/api/collect/tasks/{id}` | 删除任务（连带运行记录） |
 | POST | `/api/collect/tasks/{id}/run` | 立即执行 → run |
-| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit, endpoint_id}` → `{items:[{status, records_path, columns, rows, pagination, total, estimated_pages, error, hint, warning?}]}`。`warning` 仅在试抓降级（如没有可用登录态、按无登录态试抓）时出现；`error` 为空即视为成功；`endpoint_id` 传了就只试抓那一个接口 |
+| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit, endpoint_id}` → `{items:[{endpoint_id, name, url, status, records, records_path, columns, rows, fields, pagination?, total?, estimated_pages?, error?, hint?, warning?, request?, response?, process?, session?}]}`。每个接口都带**详细执行明细**：`request`（`{method, url, headers, body, query_params, vars, retries, duration_ms}`，Cookie / Authorization / password 等敏感值已打码）、`response`（`{status, status_text, headers, size, body_preview, content_type}`）、`process`（会话 → 公共参数 → 变量 → 分页 → 请求 → 响应的逐步说明）、`session`（登录态摘要）。`warning` 仅在试抓降级（如没有可用登录态、按无登录态试抓）时出现；`error` 为空即视为成功；`endpoint_id` 传了就只试抓那一个接口 |
 | POST | `/api/collect/tasks/{id}/analyze` | 用保存的样本重算字段**与分页**：`{endpoint_id, records_path?}` |
 | POST | `/api/collect/tasks/{id}/detect-pagination` | 只重算分页：`{endpoint_id}` → `{pagination, pagination_text, hint}` |
 | POST | `/api/collect/tasks/{id}/test-sink` | 试连落库目标（只建连接，不写数据） |
@@ -330,8 +332,46 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | POST | `/api/collect/tasks/{id}/token` | 立刻按当前登录状态读一次 Token（`browser` 来源会真的打开内置浏览器，不吃缓存）；返回 `{header, prefix, token, length, preview}` |
 | POST | `/api/collect/tasks/{id}/prelogin` | 立刻跑一遍「前置登录」的 UI 自动化录制，并导出会话；返回 `{ok, run_id, elapsed_ms, cookie_count, token_preview, error, session_error}` |
 | POST | `/api/collect/tasks/{id}/selftest` | 自检：`{run_prelogin}` → `{ok, steps:[{title, ok, detail}]}`，把「前置登录 → 导出会话 → 真发一次请求」逐步报告 |
+| POST | `/api/collect/tasks/{id}/common/suggest` | 从录制结果汇总公共参数（只读）：可传 `{capture_id, request_ids[]}`，省略时用任务的 `created_from` 反查；→ `{common, notes[], matched, source}`。只提取「每个接口都一样」的 query/body/请求头/Cookie，分页参数排除，鉴权头自动换成 `{{token}}` 并生成绑定 |
+| POST | `/api/collect/tasks/{id}/common/import` | 粘贴导入（只解析）：`{cookie, headers, params, curl}` 任填一项 → `{common, notes[]}`；解析结果会**合并**进任务已有的公共参数（已有值不覆盖），不会自动保存，需再调 PATCH |
+| POST | `/api/collect/tasks/{id}/common/refresh` | 登录后刷新（只读，不保存配置）：`{run_prelogin?:true}` → `{ok, prelogin_ok?, prelogin_error?, refresh:{session, applied[], params{}, headers{}, cookies{}, bindings[], notes[]}}`，敏感值已打码。先作废缓存会话再重新导出，用来确认「登录后 token 到底换没换」 |
 
 详情里额外带：`sink_target`（人可读的写入目标）、`split_by_endpoint`、`sink_profile_id`、`endpoint_sinks{endpoint_id: {driver, table, target}}`。
+
+**公共参数（会话参数）**
+
+建任务弹窗里还没有任务 id，用不带任务的两个接口；任务详情页用带 `{id}` 的三个接口（会自动和已有配置合并）。
+
+```http
+POST /api/collect/common/suggest
+{"capture_id":"cap_xxx","request_ids":["req_1","req_2"]}
+```
+
+```http
+POST /api/collect/common/import
+{
+  "cookie": "SESSION=xxx; token=yyy",
+  "headers": "Authorization: Bearer xxx\nX-Tenant: demo",
+  "params": "{\"tenant_id\":\"1001\"}",
+  "curl": "curl 'https://api.example.com/x' -H 'Authorization: Bearer yyy'"
+}
+```
+
+```json
+{
+  "common": {
+    "params": {"token": "yyy", "tenant_id": "1001"},
+    "headers": {"X-Tenant": "demo"},
+    "cookies": {"SESSION": "xxx"},
+    "bindings": [{"param": "token", "target": "header", "name": "Authorization", "template": "Bearer {{token}}"}]
+  },
+  "notes": ["导入 Cookie 1 个（登录后的浏览器 Cookie 会优先）"]
+}
+```
+
+常见场景：登录换了 token 但请求头里还是旧值 → 在公共参数里开「登录后自动刷新」，`token_param=token`，再配一条
+`token -> header:Authorization = Bearer {{token}}` 的绑定（不配也行，刷新时会自动补上），每次运行 / 试抓都会先刷新再发请求。
+
 
 **落库配置（数据写入页）**
 
