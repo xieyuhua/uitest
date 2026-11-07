@@ -268,6 +268,9 @@ type AISettings struct {
 	APIKey     string `json:"api_key,omitempty"`
 	Model      string `json:"model"`
 	TimeoutSec int    `json:"timeout_sec"`
+	// VisionModel 识别图形验证码用的多模态模型（留空 = 复用 Model）。
+	// 前置动作里的「识别验证码」会截图发给它，要求支持 image_url 输入。
+	VisionModel string `json:"vision_model,omitempty"`
 }
 
 // BrowserSettings 内置浏览器配置。

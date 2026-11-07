@@ -15,11 +15,12 @@ import (
 /* ---------------------------------------------------------------- 设置 */
 
 type aiSettingsView struct {
-	BaseURL    string `json:"base_url"`
-	Model      string `json:"model"`
-	HasKey     bool   `json:"has_key"`
-	KeyHint    string `json:"key_hint"`
-	TimeoutSec int    `json:"timeout_sec"`
+	BaseURL     string `json:"base_url"`
+	Model       string `json:"model"`
+	VisionModel string `json:"vision_model"`
+	HasKey      bool   `json:"has_key"`
+	KeyHint     string `json:"key_hint"`
+	TimeoutSec  int    `json:"timeout_sec"`
 }
 
 type settingsView struct {
@@ -42,11 +43,12 @@ func (s *Server) settingsView() settingsView {
 	}
 	return settingsView{
 		AI: aiSettingsView{
-			BaseURL:    st.AI.BaseURL,
-			Model:      st.AI.Model,
-			HasKey:     st.AI.APIKey != "",
-			KeyHint:    hint,
-			TimeoutSec: st.AI.TimeoutSec,
+			BaseURL:     st.AI.BaseURL,
+			Model:       st.AI.Model,
+			VisionModel: st.AI.VisionModel,
+			HasKey:      st.AI.APIKey != "",
+			KeyHint:     hint,
+			TimeoutSec:  st.AI.TimeoutSec,
 		},
 		Browser: st.Browser,
 		Assist:  st.Assist,
@@ -62,10 +64,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 type putSettingsReq struct {
 	AI *struct {
-		BaseURL    *string `json:"base_url"`
-		APIKey     *string `json:"api_key"`
-		Model      *string `json:"model"`
-		TimeoutSec *int    `json:"timeout_sec"`
+		BaseURL     *string `json:"base_url"`
+		APIKey      *string `json:"api_key"`
+		Model       *string `json:"model"`
+		VisionModel *string `json:"vision_model"`
+		TimeoutSec  *int    `json:"timeout_sec"`
 	} `json:"ai"`
 	Browser *struct {
 		Executable      *string   `json:"executable"`
@@ -111,6 +114,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.AI.APIKey != nil && strings.TrimSpace(*req.AI.APIKey) != "" {
 			st.AI.APIKey = strings.TrimSpace(*req.AI.APIKey)
+		}
+		if req.AI.VisionModel != nil {
+			st.AI.VisionModel = strings.TrimSpace(*req.AI.VisionModel)
 		}
 		if req.AI.TimeoutSec != nil && *req.AI.TimeoutSec > 0 {
 			st.AI.TimeoutSec = *req.AI.TimeoutSec

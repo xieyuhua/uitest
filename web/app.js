@@ -3270,7 +3270,7 @@
     var state = { data: null, backups: null };
     var bodyEl = null;
 
-    // 子菜单（每个设置分区一个独立页面/独立菜单项）
+    // 页内 tab 只在左侧菜单收起时才显示（菜单展开时用二级菜单，不再重复导航）
     var tabs = SETTINGS_SECTIONS.map(function (s) {
       return '<a class="settings-tab' + (s.key === sec ? ' active' : '') + '" href="#/settings/' + s.key + '" title="' + esc(s.desc) + '">' +
         esc(s.label) + '</a>';
@@ -3280,20 +3280,19 @@
       '<div class="page-head">' +
       '<div><h1>设置</h1>' +
       '<p class="sub">' + esc((SETTINGS_SECTIONS.filter(function (x) { return x.key === sec; })[0] || {}).desc || '') + '</p></div>' +
-      '<div class="head-actions">' +
-      (sec === 'help' ? '' : '<button class="btn" data-act="reload">重新读取</button>') +
+      '<div class="head-actions"></div>' +
       '</div>' +
-      '</div>' +
-      '<nav class="settings-tabs">' + tabs + '</nav>' +
+      '<nav class="settings-tabs" aria-label="设置分区">' + tabs + '</nav>' +
       '<div id="settings-body">' + loadingCard() + '</div>';
 
     bodyEl = $('#settings-body', root);
 
     function saveBarHtml() {
-      return '<section class="card"><div class="card-body head-actions">' +
-        '<button class="btn btn--primary" data-act="save">保存本页设置</button>' +
-        '<button class="btn" data-act="reload">取消并重新读取</button>' +
-        '</div></section>';
+      return '<div class="save-bar">' +
+        '<span class="save-bar-text">改完点保存才会生效</span>' +
+        '<button class="btn" data-act="reload">重新读取</button>' +
+        '<button class="btn btn--primary" data-act="save">保存设置</button>' +
+        '</div>';
     }
 
     /* ---- AI 数据生成 ---- */
@@ -3306,20 +3305,28 @@
       return '<section class="card">' +
         '<div class="card-head"><h2>AI 数据生成</h2>' + keyBadge + '</div>' +
         '<div class="card-body">' +
+        '<div class="form-grid">' +
         field('base_url',
           '<input class="input input--mono" id="s-base-url" value="' + esc(ai.base_url || '') + '" placeholder="https://api.openai.com/v1">',
           '兼容 OpenAI 协议的接口根地址。') +
         field('model',
           '<input class="input input--mono" id="s-model" value="' + esc(ai.model || '') + '" placeholder="gpt-4o-mini">') +
+        '</div>' +
         field('api_key',
           '<input class="input input--mono" id="s-api-key" type="password" autocomplete="new-password" value="" placeholder="' +
           (ai.has_key ? '已配置（不显示）' : '未配置，留空表示不修改') + '">',
           '只写不读：留空则不提交该字段，服务端保持原值。') +
+        '<details class="adv-block"><summary>高级（超时 / 验证码视觉模型）</summary>' +
+        '<div class="form-grid">' +
         field('timeout_sec',
           '<input class="input input--mono" id="s-timeout" type="number" min="1" step="1" value="' +
           esc(ai.timeout_sec === null || ai.timeout_sec === undefined ? '' : ai.timeout_sec) + '" placeholder="30">',
           '调用大模型的超时时间（秒）。') +
-        '<div class="alert alert--info">没配置大模型也能用：生成测试数据时会自动改用内置规则（离线可用）。</div>' +
+        field('vision_model',
+          '<input class="input input--mono" id="s-vision-model" value="' + esc(ai.vision_model || '') + '" placeholder="留空 = 用上面的 model">',
+          '识别图形验证码要用支持图片输入的模型（如 gpt-4o-mini / qwen-vl-max）。') +
+        '</div></details>' +
+        '<div class="alert alert--info">没配置大模型也能用：生成测试数据会自动改用内置规则（离线可用）；验证码识别失败时走人工接管。</div>' +
         (sv.port ? '<div class="field-hint">服务端端口：<span class="mono">' + esc(sv.port) + '</span></div>' : '') +
         '</div></section>' +
         saveBarHtml();
@@ -3329,45 +3336,48 @@
     function browserCardHtml(s) {
       var br = s.browser || {};
       return '<section class="card">' +
-        '<div class="card-head"><h2>内置浏览器</h2></div>' +
+        '<div class="card-head"><h2>内置浏览器</h2><span class="count-pill">采集会话 / UI 自动化共用</span></div>' +
         '<div class="card-body">' +
-        field('executable',
-          '<input class="input input--mono" id="s-exec" value="' + esc(br.executable || '') + '" placeholder="留空 = 自动探测 Edge / Chrome">',
-          '例如 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe') +
+        '<div class="form-grid">' +
         '<div class="field"><label>headless</label>' +
         '<label class="check-line"><input type="checkbox" id="s-headless"' + (br.headless ? ' checked' : '') + '>' +
         '<span>无头模式运行（不弹出窗口）</span></label></div>' +
-        '<div class="form-row">' +
-        '<div class="field"><label for="s-step-delay">step_delay_ms</label>' +
-        '<input class="input input--mono" id="s-step-delay" type="number" min="0" step="50" value="' +
-        esc(br.step_delay_ms === null || br.step_delay_ms === undefined ? '' : br.step_delay_ms) + '" placeholder="200"></div>' +
-        '<div class="field"><label for="s-action-timeout">action_timeout_ms</label>' +
-        '<input class="input input--mono" id="s-action-timeout" type="number" min="0" step="500" value="' +
-        esc(br.action_timeout_ms === null || br.action_timeout_ms === undefined ? '' : br.action_timeout_ms) + '" placeholder="8000"></div>' +
-        '</div>' +
-        field('kernel_dir',
-          '<input class="input input--mono" id="s-kernel-dir" value="' + esc(br.kernel_dir || '') + '" placeholder="留空 = 用脚本自动探测的系统浏览器；例：D:\\browser\\chrome-win64">',
-          '自带内核目录：把 Chrome for Testing 解压到这里（或用 scripts/fetch-browser.ps1 一键下载），服务端优先用它，完全不依赖系统浏览器。') +
-        field('debug_url',
-          '<input class="input input--mono" id="s-debug-url" value="' + esc(br.debug_url || '') + '" placeholder="留空 = 由服务端自己拉起浏览器；例：http://127.0.0.1:9400">',
-          '连接一个已在运行的浏览器（先手工执行 msedge --remote-debugging-port=9400），服务端不再自己启动浏览器。') +
-        '<div class="field"><label for="s-after-run">after_run（运行结束后）</label>' +
+        '<div class="field"><label for="s-after-run">运行结束后</label>' +
         '<select class="input" id="s-after-run">' +
         '<option value="auto"' + ((br.after_run || 'auto') === 'auto' ? ' selected' : '') + '>auto：通过就关标签页，失败保留现场（推荐）</option>' +
         '<option value="close_tab"' + (br.after_run === 'close_tab' ? ' selected' : '') + '>close_tab：每次都关掉本次标签页</option>' +
         '<option value="close_browser"' + (br.after_run === 'close_browser' ? ' selected' : '') + '>close_browser：每次都关掉整个内置浏览器</option>' +
         '<option value="keep"' + (br.after_run === 'keep' ? ' selected' : '') + '>keep：都不关，保留现场随时查看</option>' +
-        '</select>' +
-        '<span class="field-hint">运行结束后怎么处理后台浏览器。选 auto 时：执行通过就关掉本次标签页（浏览器继续跑，下次开页更快），' +
-        '执行失败/取消则把标签页停在失败页面，方便你直接看现场。</span></div>' +
+        '</select></div>' +
+        '</div>' +
+        '<div class="field-hint">auto：执行通过就关掉本次标签页，失败/取消则停在失败页面方便看现场。采集任务的前置动作也按这个策略收尾。</div>' +
         '<div class="card-sub">' +
         '<button class="btn btn--sm" data-act="diagnose">诊断浏览器</button>' +
         '<span class="field-hint">真实打开一个页面，检查渲染进程、内核路径与启动参数</span>' +
         '</div>' +
         '<pre id="diagnose-out" class="diagnose-out hidden"></pre>' +
+        '<details class="adv-block"><summary>高级（内核 / 调试端口 / 超时 / 启动参数）</summary>' +
+        field('kernel_dir',
+          '<input class="input input--mono" id="s-kernel-dir" value="' + esc(br.kernel_dir || '') + '" placeholder="留空 = 用脚本自动探测的系统浏览器；例：D:\\browser\\chrome-win64">',
+          '自带内核目录（优先）：把 Chrome for Testing 解压到这里，或用 scripts/fetch-browser.ps1 一键下载。') +
+        field('executable',
+          '<input class="input input--mono" id="s-exec" value="' + esc(br.executable || '') + '" placeholder="留空 = 自动探测 Edge / Chrome（kernel_dir 优先）">',
+          '只有 kernel_dir 留空时才用它；例如 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe') +
+        field('debug_url',
+          '<input class="input input--mono" id="s-debug-url" value="' + esc(br.debug_url || '') + '" placeholder="留空 = 由服务端自己拉起浏览器；例：http://127.0.0.1:9400">',
+          '连接一个已在运行的浏览器（先手工执行 msedge --remote-debugging-port=9400），服务端不再自己启动浏览器。') +
+        '<div class="form-grid">' +
+        '<div class="field"><label for="s-step-delay">step_delay_ms</label>' +
+        '<input class="input input--mono" id="s-step-delay" type="number" min="0" step="50" value="' +
+        esc(br.step_delay_ms === null || br.step_delay_ms === undefined ? '' : br.step_delay_ms) + '" placeholder="260"></div>' +
+        '<div class="field"><label for="s-action-timeout">action_timeout_ms</label>' +
+        '<input class="input input--mono" id="s-action-timeout" type="number" min="0" step="500" value="' +
+        esc(br.action_timeout_ms === null || br.action_timeout_ms === undefined ? '' : br.action_timeout_ms) + '" placeholder="15000"></div>' +
+        '</div>' +
         '<div class="field"><label>no_sandbox</label>' +
         '<label class="check-line"><input type="checkbox" id="s-nosandbox"' + (br.no_sandbox ? ' checked' : '') + '>' +
         '<span>启动时追加 --no-sandbox（渲染进程一直崩溃时再打开）</span></label></div>' +
+        '</details>' +
         '</div></section>' +
         saveBarHtml();
     }
@@ -3538,7 +3548,8 @@
         payload.ai = {
           base_url: read('s-base-url'),
           model: read('s-model'),
-          timeout_sec: readNum('s-timeout', 0)
+          timeout_sec: readNum('s-timeout', 0),
+          vision_model: read('s-vision-model')
         };
         var key = read('s-api-key');
         if (key) payload.ai.api_key = key;   // 留空 → 不提交，保持原值
