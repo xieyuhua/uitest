@@ -324,17 +324,18 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | PATCH | `/api/collect/tasks/{id}` | 局部更新：`name/description/start_url/status/schedule/throttle/sink/session/endpoints`，以及 `split_by_endpoint`（每接口分表）/ `sink_profile_id`；`endpoints[].sink` 可给单个接口单独指定 `{"table":"..."}` |
 | DELETE | `/api/collect/tasks/{id}` | 删除任务（连带运行记录） |
 | POST | `/api/collect/tasks/{id}/run` | 立即执行 → run |
-| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit, endpoint_id}` → `{items:[{endpoint_id, name, url, status, records, records_path, columns, rows, fields, pagination?, total?, estimated_pages?, error?, hint?, warning?, request?, response?, process?, session?}]}`。每个接口都带**详细执行明细**：`request`（`{method, url, headers, body, query_params, vars, retries, duration_ms}`，Cookie / Authorization / password 等敏感值已打码）、`response`（`{status, status_text, headers, size, body_preview, content_type}`）、`process`（会话 → 公共参数 → 变量 → 分页 → 请求 → 响应的逐步说明）、`session`（登录态摘要）。`warning` 仅在试抓降级（如没有可用登录态、按无登录态试抓）时出现；`error` 为空即视为成功；`endpoint_id` 传了就只试抓那一个接口 |
+| POST | `/api/collect/tasks/{id}/preview` | 试抓（只抓第一页、**不写库**），`{limit, endpoint_id, run_prelogin?}`（`run_prelogin:true` 先跑一遍前置动作再试抓）→ `{items:[{endpoint_id, name, url, status, records, records_path, columns, rows, fields, pagination?, total?, estimated_pages?, error?, hint?, warning?, request?, response?, process?, session?, timeline?}]}`。每个接口都带**详细执行明细**：`request`（`{method, url, headers, body, query_params, vars, retries, duration_ms}`，Cookie / Authorization / password 等敏感值已打码）、`response`（`{status, status_text, headers, size, body_preview, content_type}`）、`process`（会话 → 公共参数 → 变量 → 分页 → 请求 → 响应的逐步说明）、`session`（登录态摘要）、`timeline`（**时间线**，见下）。`warning` 仅在试抓降级（如没有可用登录态、按无登录态试抓）时出现；`error` 为空即视为成功；`endpoint_id` 传了就只试抓那一个接口 |
 | POST | `/api/collect/tasks/{id}/analyze` | 用保存的样本重算字段**与分页**：`{endpoint_id, records_path?}` |
 | POST | `/api/collect/tasks/{id}/detect-pagination` | 只重算分页：`{endpoint_id}` → `{pagination, pagination_text, hint}` |
 | POST | `/api/collect/tasks/{id}/test-sink` | 试连落库目标（只建连接，不写数据） |
 | POST | `/api/collect/tasks/{id}/test-notify` | （兼容保留）用系统设置里的企业微信机器人发一条测试消息 |
 | POST | `/api/collect/tasks/{id}/token` | 立刻按当前登录状态读一次 Token（`browser` 来源会真的打开内置浏览器，不吃缓存）；返回 `{header, prefix, token, length, preview}` |
-| POST | `/api/collect/tasks/{id}/prelogin` | 立刻跑一遍「前置登录」的 UI 自动化录制，并导出会话；返回 `{ok, run_id, elapsed_ms, cookie_count, token_preview, error, session_error}` |
+| POST | `/api/collect/tasks/{id}/prelogin` | 立刻跑一遍「前置动作」的 UI 自动化录制，并导出会话；返回 `{ok, run_id, elapsed_ms, cookie_count, token_preview, error, session_error}` |
+| POST | `/api/collect/tasks/{id}/login/test` | 只跑一次登录接口（`session.source=http`），看 token / Cookie 拿没拿到：`{url?, method?, headers?, body?, vars?, token_path?, param?, header?, prefix?, with_cookies?}`（省略的字段用任务里已保存的）→ `{ok, elapsed_ms, trace:{token_path, param, header, token_preview, token_length, body, cookies, response_headers, body_preview, note}, applied[]}`；密码与响应体里的 token 一律打码 |
 | POST | `/api/collect/tasks/{id}/selftest` | 自检：`{run_prelogin}` → `{ok, steps:[{title, ok, detail}]}`，把「前置登录 → 导出会话 → 真发一次请求」逐步报告 |
-| POST | `/api/collect/tasks/{id}/common/suggest` | 从录制结果汇总公共参数（只读）：可传 `{capture_id, request_ids[]}`，省略时用任务的 `created_from` 反查；→ `{common, notes[], matched, source}`。只提取「每个接口都一样」的 query/body/请求头/Cookie，分页参数排除，鉴权头自动换成 `{{token}}` 并生成绑定 |
-| POST | `/api/collect/tasks/{id}/common/import` | 粘贴导入（只解析）：`{cookie, headers, params, curl}` 任填一项 → `{common, notes[]}`；解析结果会**合并**进任务已有的公共参数（已有值不覆盖），不会自动保存，需再调 PATCH |
-| POST | `/api/collect/tasks/{id}/common/refresh` | 登录后刷新（只读，不保存配置）：`{run_prelogin?:true}` → `{ok, prelogin_ok?, prelogin_error?, refresh:{session, applied[], params{}, headers{}, cookies{}, bindings[], notes[]}}`，敏感值已打码。先作废缓存会话再重新导出，用来确认「登录后 token 到底换没换」 |
+| POST | `/api/collect/tasks/{id}/common/suggest` | 从录制结果汇总公共参数（只读）：可传 `{capture_id, request_ids[]}`，省略时用任务的 `created_from` 反查；→ `{common, notes[], matched, source}`。只提取「每个接口都一样」的 query/body/请求头/Cookie，分页参数排除，鉴权头自动换成 `{{token}}` 并生成绑定；合并进任务时**同名项用新值覆盖** |
+| POST | `/api/collect/tasks/{id}/common/import` | 粘贴导入（只解析）：`{cookie, headers, params, curl}` 任填一项 → `{common, notes[]}`；解析结果会**合并**进任务已有的公共参数（**同名项用新值覆盖**，没填的补上），不会自动保存，需再调 PATCH |
+| POST | `/api/collect/tasks/{id}/common/refresh` | 刷新会话并**写回**任务配置：`{run_prelogin?:true}` → `{ok, prelogin_ok?, prelogin_error?, refresh:{source, source_text, login, applied[], params{}, headers{}, cookies{}, bindings[], notes[]}, saved[], warning?}`，敏感值已打码。`ui` 来源重新导出浏览器会话，`http` 来源重调登录接口；刷新到的参数全部、以及公共 Cookie 里已声明的同名 Cookie 会直接落库，`saved` 列出改了哪些（如 `["参数:token","Cookie:demo_sid"]`） |
 
 详情里额外带：`sink_target`（人可读的写入目标）、`split_by_endpoint`、`sink_profile_id`、`endpoint_sinks{endpoint_id: {driver, table, target}}`。
 
@@ -371,6 +372,32 @@ POST /api/collect/common/import
 
 常见场景：登录换了 token 但请求头里还是旧值 → 在公共参数里开「登录后自动刷新」，`token_param=token`，再配一条
 `token -> header:Authorization = Bearer {{token}}` 的绑定（不配也行，刷新时会自动补上），每次运行 / 试抓都会先刷新再发请求。
+
+**试抓时间线（`timeline`）**
+
+`preview` 每个接口都带一条时间线，按执行顺序给出每一步：`index`（从 1 连续编号）、`action`、`title`、`target`、
+`value_used`（脱敏）、`status`（`ok` / `warn` / `error` / `skip`）、`duration_ms`、`screenshot`（前置动作最后一张截图）、
+`message`、`details`（键值明细）。
+
+`action` 取值：`prelogin`（前置动作）、`session`（会话来源与 Cookie）、`login`（登录接口换 token）、
+`headers`（浏览器请求头）、`refresh`（登录后刷新公共参数）、`bindings`（参数绑定）、`script`、
+`vars`（变量展开）、`request`（真正发出去的请求）、`response`、`parse`（记录路径与行数）。
+URL / 请求头 / 请求体里的 token Cookie 全部按值打码。
+
+```json
+{
+  "timeline": [
+    {"index": 1, "action": "session", "title": "会话：登录接口换 token", "status": "ok",
+     "message": "已拿到 token", "details": {"来源": "登录接口换 token"}},
+    {"index": 2, "action": "login", "title": "登录接口", "target": "POST /demo/api/login",
+     "value_used": "demo…k0y4", "status": "ok", "duration_ms": 12},
+    {"index": 3, "action": "bindings", "title": "token -> header:Authorization",
+     "value_used": "Bear…k0y4", "status": "ok"},
+    {"index": 4, "action": "request", "title": "GET /demo/api/orders", "status": "ok",
+     "details": {"Authorization": "Bear…k0y4"}}
+  ]
+}
+```
 
 
 **落库配置（数据写入页）**
