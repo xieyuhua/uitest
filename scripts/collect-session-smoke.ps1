@@ -239,6 +239,38 @@ try {
     Report "试抓过程里有「登录后刷新」步骤" ($procText.Contains("登录后刷新公共参数")) ("过程=" + $procText)
     $pvTok = [string]$item.request.vars.token
     Report "试抓变量里的 token 与刷新结果一致" ($pvTok -eq $tokB) ("vars.token=" + $pvTok)
+
+    # 时间线：会话 → 刷新 → 绑定 → 变量 → 请求 → 响应 → 解析，每一步都要有状态和明细
+    $tl = @($item.timeline)
+    Report "试抓返回时间线" ($tl.Count -ge 6) ("步骤=" + $tl.Count)
+    $acts = (@($tl | ForEach-Object { [string]$_.action })) -join ","
+    $seqOk = $acts.Contains("session") -and $acts.Contains("refresh") -and $acts.Contains("bindings") -and $acts.Contains("vars") -and $acts.Contains("request") -and $acts.Contains("response") -and $acts.Contains("parse")
+    Report "时间线包含 会话/刷新/绑定/变量/请求/响应/解析" $seqOk ("actions=" + $acts)
+    $idxOk = $true
+    for ($i = 0; $i -lt $tl.Count; $i++) {
+      if ([int]$tl[$i].index -ne ($i + 1)) { $idxOk = $false }
+      if ([string]$tl[$i].status -eq "") { $idxOk = $false }
+    }
+    Report "时间线编号连续且每步都有状态" $idxOk ("首步=" + $tl[0].title)
+    $reqStep = @($tl | Where-Object { [string]$_.action -eq "request" })[0]
+    $reqAuth = [string]$reqStep.details."Header Authorization"
+    Report "时间线请求步骤里 Authorization 是刷新后的新值" ($reqAuth -eq $expectAuth) ("实际=" + $reqAuth)
+    $bindStep = @($tl | Where-Object { [string]$_.action -eq "bindings" -and [string]$_.target -eq "header:Authorization" })[0]
+    Report "时间线里有 token → header:Authorization 绑定" ($null -ne $bindStep) ("value=" + $bindStep.value_used)
+    $refreshStep = @($tl | Where-Object { [string]$_.action -eq "refresh" })[0]
+    Report "时间线里的刷新步骤取到了新值" ($null -ne $refreshStep -and [string]$refreshStep.status -eq "ok") ("msg=" + $refreshStep.message)
+    $leak = $false
+    foreach ($st in $tl) {
+      if ($null -ne $st.details) {
+        foreach ($prop in $st.details.PSObject.Properties) {
+          if (([string]$prop.Value).Contains("demo-token-")) { $leak = $true }
+        }
+      }
+      if (([string]$st.value_used).Contains("demo-token-")) { $leak = $true }
+    }
+    Report "时间线里的 token 全部脱敏" (-not $leak) ("leak=" + $leak)
+    $reqUrl = [string]$reqStep.target
+    Report "时间线 URL 里的 token 已打码" (-not $reqUrl.Contains("demo-token-")) ("url=" + $reqUrl)
     $rows = @($item.records).Count
     if ($rows -eq 0) { $rows = @($item.preview).Count }
     Report "试抓解析出数据" ($rows -ge 1 -or $item.records_path -ne "") ("记录数=" + $rows + " 路径=" + $item.records_path)

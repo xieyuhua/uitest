@@ -78,6 +78,22 @@ func TestMaskIfSensitiveSessionID(t *testing.T) {
 	}
 }
 
+// URL 里的敏感 query 值要打码，参数名和普通参数保留。
+func TestMaskURLSecretsKeepsParamNames(t *testing.T) {
+	got := maskURLSecrets("https://x.com/api/orders?page=2&size=5&token=abcdef1234567890&tenant=42")
+	if strings.Contains(got, "abcdef1234567890") {
+		t.Errorf("URL 里的 token 没打码: %s", got)
+	}
+	for _, want := range []string{"token=", "page=2", "size=5", "tenant=42"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("URL 丢了 %q: %s", want, got)
+		}
+	}
+	if plain := maskURLSecrets("https://x.com/api/orders?page=2"); plain != "https://x.com/api/orders?page=2" {
+		t.Errorf("没有敏感参数时不该改 URL: %s", plain)
+	}
+}
+
 // 试抓详情里的请求 / 响应报文必须来自「真正发出去、收回来」的那一次请求。
 func TestFetchTraceRecordsRealRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +202,7 @@ func TestPreviewIncludesDetailAndProcess(t *testing.T) {
 	key := sessionTarget(&task)
 	h.cookies[key] = cachedCookies{list: []*http.Cookie{{Name: "sid", Value: "cookiesecret1234"}}, fetched: time.Now()}
 
-	out := h.Preview(context.Background(), task, 5, "")
+	out := h.Preview(context.Background(), task, 5, "", PreviewOptions{})
 	if len(out) != 1 {
 		t.Fatalf("应只试抓 1 个接口, got %d", len(out))
 	}
@@ -224,6 +240,47 @@ func TestPreviewIncludesDetailAndProcess(t *testing.T) {
 	if p.Session == "" {
 		t.Errorf("缺少登录态摘要")
 	}
+	// 时间线：会话 → 变量 → 请求 → 响应 → 解析，顺序固定、编号从 1 开始
+	if len(p.Timeline) < 5 {
+		t.Fatalf("时间线步骤太少: %+v", p.Timeline)
+	}
+	var actions []string
+	for i, st := range p.Timeline {
+		if st.Index != i+1 {
+			t.Errorf("时间线编号不连续: idx=%d want=%d", st.Index, i+1)
+		}
+		if st.Status == "" {
+			t.Errorf("时间线步骤缺少状态: %+v", st)
+		}
+		actions = append(actions, st.Action)
+	}
+	seq := strings.Join(actions, ",")
+	for _, want := range []string{"session", "vars", "request", "response", "parse"} {
+		if !strings.Contains(seq, want) {
+			t.Errorf("时间线缺少 %q: %s", want, seq)
+		}
+	}
+	if p.Timeline[0].Action != "session" {
+		t.Errorf("第一步应该是会话, got %q", p.Timeline[0].Action)
+	}
+	last := p.Timeline[len(p.Timeline)-1]
+	if last.Action != "parse" || last.Status != "ok" {
+		t.Errorf("最后一步应该是解析成功, got %+v", last)
+	}
+	if last.Details["本页记录"] == "" {
+		t.Errorf("解析步骤缺少记录数明细: %+v", last.Details)
+	}
+	// 时间线里的 Cookie 也必须打码
+	for _, st := range p.Timeline {
+		for k, v := range st.Details {
+			if strings.Contains(v, "cookiesecret1234") {
+				t.Errorf("时间线 %s/%s 泄漏了 Cookie 明文: %q", st.Action, k, v)
+			}
+		}
+		if strings.Contains(st.ValueUsed, "cookiesecret1234") {
+			t.Errorf("时间线 %s 的 ValueUsed 泄漏了 Cookie 明文", st.Action)
+		}
+	}
 	if p.Records != 2 || p.Total != 2 || p.EstimatedPages != 2 {
 		t.Errorf("解析结果不对: records=%d total=%d pages=%d", p.Records, p.Total, p.EstimatedPages)
 	}
@@ -243,7 +300,7 @@ func TestPreviewUnknownEndpointReportsError(t *testing.T) {
 	}
 	task.Normalize()
 	h.cookies[sessionTarget(&task)] = cachedCookies{list: []*http.Cookie{{Name: "sid", Value: "x"}}, fetched: time.Now()}
-	out := h.Preview(context.Background(), task, 5, "ep-missing")
+	out := h.Preview(context.Background(), task, 5, "ep-missing", PreviewOptions{})
 	if len(out) != 1 || out[0].Error == "" {
 		t.Fatalf("接口不存在时应返回明确错误, got %+v", out)
 	}

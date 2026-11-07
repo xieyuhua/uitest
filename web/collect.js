@@ -2059,6 +2059,7 @@
       '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
       '<button class="btn btn--sm btn--primary" data-act="run">立即运行</button>' +
       '<button class="btn btn--sm" data-act="preview">试抓预览</button>' +
+      '<button class="btn btn--sm" data-act="preview-prelogin" title="先跑一遍前置动作（UI 自动化登录流程），再导出会话试抓">试抓（含前置动作）</button>' +
       '<button class="btn btn--sm" data-act="selftest">自检</button>' +
       '<button class="btn btn--sm btn--ghost" data-act="test-sink">测试落库</button>' +
       '<button class="btn btn--sm btn--danger" data-act="del">删除任务</button>') +
@@ -2156,7 +2157,7 @@
           var title = titleEl ? titleEl.textContent : '';
           var target = paneRuntime;
           if (title.indexOf('公共参数') >= 0) target = paneCommon;
-          else if (title.indexOf('登录态') >= 0 || title.indexOf('前置登录') >= 0) target = paneLogin;
+          else if (title.indexOf('登录态') >= 0 || title.indexOf('前置登录') >= 0 || title.indexOf('前置动作') >= 0) target = paneLogin;
           if (target) target.appendChild(el);
         });
         if (cfgHost.parentNode) cfgHost.parentNode.removeChild(cfgHost);
@@ -2771,6 +2772,18 @@
           .then(function (res) { showPreviewModal(U().apiItems(res)); }).catch(function () { });
         return;
       }
+      if (act === 'preview-prelogin') {
+        var plCfg = (state.task && state.task.prelogin) || {};
+        if (!plCfg.enabled || !plCfg.recording_id) {
+          toast('没配前置动作：先在「登录」页签选一个「登录流程录制」并打开开关', 'info');
+          return;
+        }
+        toast('先跑前置动作再试抓（会开浏览器，可能要十几秒）…', 'info');
+        api('POST', '/api/collect/tasks/' + encodeURIComponent(state.id) + '/preview',
+          { limit: 5, run_prelogin: true })
+          .then(function (res) { showPreviewModal(U().apiItems(res)); }).catch(function () { });
+        return;
+      }
       var goto = t.closest('[data-goto]');
       if (goto) { go(goto.getAttribute('data-goto')); }
     });
@@ -2796,6 +2809,84 @@
     return '<pre class="pv-pre">' + esc(text || '') + '</pre>';
   }
 
+  // 时间线每一步的标签（和后端 PreviewStep.action 对齐）
+  var PV_ACTION_LABEL = {
+    prelogin: '前置动作', session: '会话', login: '登录接口', headers: '请求头',
+    refresh: '刷新参数', bindings: '绑定', script: '脚本', vars: '变量',
+    request: '请求', response: '响应', parse: '解析'
+  };
+
+  /** 试抓时间线：前置动作 → 会话 → 登录 → 刷新参数 → 变量 → 请求 → 响应 → 解析 */
+  function pvTimelineHtml(steps) {
+    steps = steps || [];
+    if (!steps.length) return '';
+    return '<div class="pv-section"><div class="pv-section-title">抓取过程时间线</div><ol class="pv-timeline">' +
+      steps.map(function (s) {
+        var status = s.status || 'ok';
+        var label = PV_ACTION_LABEL[s.action] || s.action || '步骤';
+        var head = '<div class="pv-tl-head">' +
+          '<span class="pv-tl-dot pv-tl-dot--' + esc(status) + '"></span>' +
+          '<span class="pv-tl-idx">' + esc(s.index || '') + '</span>' +
+          '<span class="pv-tl-badge">' + esc(label) + '</span>' +
+          '<span class="pv-tl-title">' + esc(s.title || '') + '</span>' +
+          (s.status === 'skip' ? '<span class="pv-tl-flag">跳过</span>' : '') +
+          (s.duration_ms ? '<span class="pv-tl-ms">' + esc(fmtMS(s.duration_ms)) + '</span>' : '') +
+          '</div>';
+        var body = '';
+        if (s.target) body += '<div class="pv-tl-target">' + esc(s.target) + '</div>';
+        if (s.value_used) body += '<div class="pv-tl-value mono">→ ' + esc(s.value_used) + '</div>';
+        if (s.message) body += '<div class="pv-tl-msg pv-tl-msg--' + esc(status) + '">' + esc(s.message) + '</div>';
+        if (s.details && Object.keys(s.details).length) {
+          body += pvDetailsHtml('明细（' + Object.keys(s.details).length + ' 项）', pvKVHtml(s.details));
+        }
+        if (s.screenshot) {
+          var src = String(s.screenshot).charAt(0) === '/' ? s.screenshot : '/' + s.screenshot;
+          body += '<div class="pv-tl-shot"><a href="' + esc(src) + '" target="_blank" rel="noopener">' +
+            '<img src="' + esc(src) + '" alt="步骤截图" loading="lazy"></a>' +
+            '<span class="muted">前置动作最后一张截图</span></div>';
+        }
+        return '<li class="pv-tl-item pv-tl-item--' + esc(status) + '">' + head + body + '</li>';
+      }).join('') + '</ol></div>';
+  }
+
+  /** 会话追踪：来源 / Cookie / 请求头 / token / 参数 / 绑定（值由后端脱敏） */
+  function sessionTraceHtml(st) {
+    st = st || {};
+    var rows = [];
+    rows.push(['会话来源', st.source_text || st.source || '—']);
+    if (st.host) rows.push(['站点', st.host]);
+    rows.push(['请求头覆盖', st.header_mode === 'off' ? '不覆盖（只用接口配置）'
+      : (st.header_mode === 'auth' ? '只覆盖鉴权类（Authorization / *token*）' : '全部共享')]);
+    rows.push(['Cookie', (st.cookie_count || 0) + ' 个' +
+      ((st.cookies || []).length ? '（' + st.cookies.join('、') + '）' : '')]);
+    if (st.token_header) {
+      rows.push(['Token 来源头', st.token_header + (st.token_prefix ? ' · 前缀 ' + st.token_prefix : '')]);
+    }
+    if (st.token_preview) {
+      rows.push(['Token（脱敏）', st.token_preview + (st.token_length ? '（' + st.token_length + ' 字符）' : '')]);
+    }
+    if ((st.refresh || []).length) rows.push(['登录后刷新', st.refresh.join('、')]);
+    if ((st.bindings || []).length) {
+      rows.push(['参数绑定', st.bindings.map(function (b) {
+        return (b.param || '') + ' → ' + (b.target || 'header') + ':' + (b.name || '');
+      }).join('；')]);
+    }
+    if (st.script_ran) rows.push(['登录后脚本', '已执行']);
+    var html = '<div class="table-wrap"><table class="pv-kv"><tbody>' +
+      rows.map(function (r) { return '<tr><th>' + esc(r[0]) + '</th><td>' + esc(r[1]) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>';
+    if (st.headers && Object.keys(st.headers).length) {
+      html += '<div class="pv-sub-title">登录态请求头（脱敏）</div>' + pvKVHtml(st.headers);
+    }
+    if (st.params && Object.keys(st.params).length) {
+      html += '<div class="pv-sub-title">公共参数（脱敏）</div>' + pvKVHtml(st.params);
+    }
+    (st.notes || []).forEach(function (n) {
+      html += '<div class="alert alert--warn" style="margin-top:6px">' + esc(n) + '</div>';
+    });
+    return html;
+  }
+
   function renderPreviewItem(p) {
     var req = p.request || {};
     var resp = p.response || {};
@@ -2814,9 +2905,26 @@
         (p.hint ? '<br>' + esc(p.hint) : '') + '</div>';
     }
 
-    if ((p.process || []).length) {
+    if ((p.timeline || []).length) {
+      html += pvTimelineHtml(p.timeline);
+      if ((p.process || []).length) {
+        html += pvDetailsHtml('文字版过程（复制用）', '<ol class="pv-steps">' +
+          p.process.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>');
+      }
+    } else if ((p.process || []).length) {
       html += '<div class="pv-section"><div class="pv-section-title">抓取过程</div><ol class="pv-steps">' +
         p.process.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
+    }
+
+    if (p.login || p.session_trace) {
+      var traceInner = '';
+      if (p.login) {
+        traceInner += '<div class="pv-sub-title">登录接口过程</div>' + loginTraceHtml(p.login, { ok: !p.login.error });
+      }
+      if (p.session_trace) {
+        traceInner += '<div class="pv-sub-title">会话拼装过程</div>' + sessionTraceHtml(p.session_trace);
+      }
+      html += pvDetailsHtml('会话追踪（Cookie / token 已脱敏）', traceInner);
     }
 
     var reqInner = '';
@@ -2867,7 +2975,38 @@
       if (p.session) lines.push('登录态: ' + p.session);
       if (p.warning) lines.push('[提示] ' + p.warning);
       if (p.error) lines.push('[错误] ' + p.error + (p.hint ? ' / ' + p.hint : ''));
-      (p.process || []).forEach(function (s, i) { lines.push((i + 1) + '. ' + s); });
+      if ((p.timeline || []).length) {
+        lines.push('--- 抓取过程时间线 ---');
+        (p.timeline || []).forEach(function (st) {
+          var head = (st.index || '') + '. [' + (PV_ACTION_LABEL[st.action] || st.action || '步骤') + '] ' +
+            (st.status || 'ok').toUpperCase() + (st.duration_ms ? ' ' + st.duration_ms + 'ms' : '') +
+            ' ' + (st.title || '');
+          lines.push(head);
+          if (st.target) lines.push('   对象: ' + st.target);
+          if (st.value_used) lines.push('   取值: ' + st.value_used);
+          if (st.message) lines.push('   结论: ' + st.message);
+          if (st.details) {
+            Object.keys(st.details).sort().forEach(function (k) { lines.push('   · ' + k + ': ' + st.details[k]); });
+          }
+          if (st.screenshot) lines.push('   截图: ' + st.screenshot);
+        });
+      }
+      (p.process || []).forEach(function (s, i) { lines.push('文字过程 ' + (i + 1) + '. ' + s); });
+      if (p.login) {
+        lines.push('--- 登录接口 ---');
+        lines.push('  ' + (p.login.method || 'POST') + ' ' + (p.login.url || '') + ' → ' + (p.login.status || '—') +
+          (p.login.error ? ' / ' + p.login.error : ''));
+        lines.push('  token 路径: ' + (p.login.token_path || '—') + ' · 写入参数: ' + (p.login.param || '—') +
+          ' · 请求头: ' + (p.login.header || '—'));
+      }
+      if (p.session_trace) {
+        var stx = p.session_trace;
+        lines.push('--- 会话 ---');
+        lines.push('  来源: ' + (stx.source_text || stx.source || '—') + ' · Cookie ' + (stx.cookie_count || 0) + ' 个');
+        if ((stx.cookies || []).length) lines.push('  Cookie 名单: ' + stx.cookies.join('、'));
+        if ((stx.refresh || []).length) lines.push('  登录后刷新: ' + stx.refresh.join('、'));
+        (stx.notes || []).forEach(function (n) { lines.push('  [提示] ' + n); });
+      }
       lines.push('请求: ' + (req.method || 'GET') + ' ' + (p.url || req.url || ''));
       if (req.headers) {
         lines.push('请求头:');
@@ -2909,7 +3048,7 @@
   function showPreviewModal(items) {
     items = items || [];
     var intro = items.length
-      ? '<div class="muted" style="margin-bottom:10px">下面是本次试抓实际发出去的请求与收到的响应（Cookie / Authorization / password 已打码，可直接复制给同事）。</div>'
+      ? '<div class="muted" style="margin-bottom:10px">按时间线看这次试抓：前置动作跑没跑 → 会话从哪来 → 登录接口换了什么 token → 哪个参数被刷新 / 绑定 → 实际发出去的请求与收到的响应。Cookie / Authorization / password 已打码，可直接复制给同事。</div>'
       : '';
     var body = intro + (items.map(renderPreviewItem).join('') || '<div class="muted">没有结果</div>');
     var m = U().openModal({

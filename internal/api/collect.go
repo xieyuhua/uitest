@@ -653,6 +653,8 @@ type previewReq struct {
 	Limit int `json:"limit"`
 	// EndpointID 非空时只试抓这一个接口
 	EndpointID string `json:"endpoint_id"`
+	// RunPrelogin 为 true 时先真的跑一遍前置动作（UI 自动化登录流程）再试抓
+	RunPrelogin bool `json:"run_prelogin"`
 }
 
 // previewHarvestTask POST /api/collect/tasks/{id}/preview —— 试抓一次，不写库
@@ -666,7 +668,8 @@ func (s *Server) previewHarvestTask(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := timeoutCtx(r, 180*time.Second)
 	defer cancel()
-	results := s.Collect.Harvester.Preview(ctx, t, req.Limit, strings.TrimSpace(req.EndpointID))
+	results := s.Collect.Harvester.Preview(ctx, t, req.Limit, strings.TrimSpace(req.EndpointID),
+		collect.PreviewOptions{RunPrelogin: req.RunPrelogin})
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
 

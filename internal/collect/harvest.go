@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -962,9 +963,16 @@ func (h *Harvester) runPrelogin(ctx context.Context, runID string, task *model.H
 
 // runPreloginQuiet 实际执行前置登录（不算日志，跑完作废会话缓存），运行与自检共用。
 func (h *Harvester) runPreloginQuiet(ctx context.Context, task *model.HarvestTask) error {
+	_, err := h.runPreloginQuietID(ctx, task)
+	return err
+}
+
+// runPreloginQuietID 同 runPreloginQuiet，但把 UI 自动化运行 ID 也返回：
+// 试抓时间线里要给出运行记录 / 截图入口，方便核对前置动作到底点到哪一步了。
+func (h *Harvester) runPreloginQuietID(ctx context.Context, task *model.HarvestTask) (string, error) {
 	pl := task.Prelogin.Effective()
 	if h.prelogin == nil {
-		return fmt.Errorf("服务没有装配 UI 自动化执行器，无法执行前置登录")
+		return "", fmt.Errorf("服务没有装配 UI 自动化执行器，无法执行前置登录")
 	}
 	// 登录流程的变量：录制时密码框被脱敏成 {{password}}，必须注入真实值才能真的登进去
 	dataset := h.preloginDataset(pl)
@@ -976,12 +984,12 @@ func (h *Harvester) runPreloginQuiet(ctx context.Context, task *model.HarvestTas
 	h.invalidateSession(task)
 	if err != nil {
 		if loginRunID != "" {
-			return fmt.Errorf("前置登录失败（%s）：%v；去「UI 自动化 → 运行记录」打开 %s 看截图和逐步结果",
+			return loginRunID, fmt.Errorf("前置登录失败（%s）：%v；去「UI 自动化 → 运行记录」打开 %s 看截图和逐步结果",
 				time.Since(start).Round(time.Millisecond), err, loginRunID)
 		}
-		return fmt.Errorf("前置登录失败：%w", err)
+		return "", fmt.Errorf("前置登录失败：%w", err)
 	}
-	return nil
+	return loginRunID, nil
 }
 
 // PreloginVars 展开「登录用变量」（API 手动触发前置登录时复用同一套逻辑）。
@@ -2463,6 +2471,42 @@ type PreviewResult struct {
 	Login *LoginTrace `json:"login,omitempty"`
 	// SessionTrace 会话是怎么拼出来的：来源、Cookie 名单、token、参数绑定（脱敏）
 	SessionTrace *SessionTrace `json:"session_trace,omitempty"`
+	// Timeline 这次试抓的完整时间线：前置动作 → 会话 → 登录接口 → 刷新参数 → 变量 → 请求 → 响应 → 解析
+	Timeline []PreviewStep `json:"timeline,omitempty"`
+}
+
+// PreviewStep 试抓时间线的一步。
+//
+// 试抓不只是「返回几条数据」：会话从哪来、前置动作跑没跑、登录接口换了什么 token、
+// 哪个公共参数被刷新、哪条绑定覆盖了请求头、请求发到哪、响应什么状态、解析出多少条，
+// 每一步都按顺序记下来，前端渲染成时间线，排查登录态问题不用再猜。
+//
+// 敏感值（Cookie / Authorization / token / 密码）在 Details / ValueUsed 里一律脱敏。
+type PreviewStep struct {
+	Index  int    `json:"index"`
+	Action string `json:"action"` // prelogin | session | login | headers | refresh | bindings | script | vars | request | response | parse
+	Title  string `json:"title"`
+	// Target 这一步作用的对象：接口地址 / 请求头名 / 记录路径 …
+	Target string `json:"target,omitempty"`
+	// ValueUsed 这一步最终用到的值（脱敏后的）
+	ValueUsed string `json:"value_used,omitempty"`
+	// Status ok | warn | error | skip
+	Status string `json:"status"`
+	// DurationMS 耗时（能测的步骤才有）
+	DurationMS int64 `json:"duration_ms,omitempty"`
+	// Screenshot 截图（相对路径或 /data/runs/…），前置动作跑完时给一张最新截图
+	Screenshot string `json:"screenshot,omitempty"`
+	// Message 一句话结论
+	Message string `json:"message,omitempty"`
+	// Details 这一步的明细（请求头 / 参数 / 报文预览 …）
+	Details map[string]string `json:"details,omitempty"`
+}
+
+// PreviewOptions 试抓选项。
+type PreviewOptions struct {
+	// RunPrelogin 为 true 时先真的跑一遍任务的前置动作（UI 自动化登录流程），
+	// 再导出会话试抓 —— 适合 token 会过期、必须重新登录才能拿到数据的站点。
+	RunPrelogin bool
 }
 
 // PreviewRequestInfo 试抓实际发出去的请求。请求头 / query / 变量里的敏感值都已打码，
@@ -2494,11 +2538,19 @@ type PreviewResponseInfo struct {
 // 除了数据本身，还会带上这一次请求的完整过程：请求方法 / URL / 请求头 / 请求体 /
 // query 参数 / 展开后的变量 / 重试次数 / 耗时，以及响应的状态、响应头、大小和响应体预览。
 // Cookie、Authorization、password 这类敏感值一律打码，可以直接截图或复制给同事排查。
-func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit int, endpointID string) []PreviewResult {
+func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit int, endpointID string, opts PreviewOptions) []PreviewResult {
 	task.Normalize()
 	if limit <= 0 {
 		limit = 5
 	}
+
+	// 时间线的前半段：会话是怎么来的（前置动作 → 导出会话 → 登录接口 → 刷新公共参数 → 绑定 → 脚本）
+	// 后半段每个接口再追加「变量 / 请求 / 响应 / 解析」。
+	base := make([]PreviewStep, 0, 10)
+	if task.Prelogin != nil && task.Prelogin.Active() {
+		base = append(base, h.preloginPreviewSteps(ctx, &task, opts)...)
+	}
+
 	sess, sessErr := h.resolveSession(ctx, &task)
 	warning := ""
 	if sessErr != nil {
@@ -2508,6 +2560,10 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		sess = sessionScaffold(&task)
 		warning = "没拿到登录态（" + sessErr.Error() + "）；下面按无登录态试抓，返回 401/403 说明这个接口需要登录"
 	}
+	base = append(base, sessionPreviewSteps(&task, sess, sessErr)...)
+	base = append(base, loginPreviewSteps(sess.loginTrace)...)
+	base = append(base, headerPreviewSteps(sess)...)
+
 	// 与正式运行保持一致：先刷新公共参数，再跑「登录后脚本」
 	refreshed := h.applySessionRefresh(ctx, "", &task, &sess)
 	scriptRan := false
@@ -2515,6 +2571,10 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		h.runCommonScript(ctx, "", &task, &sess)
 		scriptRan = h.br != nil
 	}
+	base = append(base, refreshPreviewSteps(&task, sess, refreshed)...)
+	base = append(base, bindingPreviewSteps(sess)...)
+	base = append(base, scriptPreviewSteps(&task, scriptRan)...)
+
 	client := h.newClient(task.Throttle, sess)
 
 	// 各接口共用的准备步骤：复制明细时每个接口都能独立看懂
@@ -2579,7 +2639,7 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		status, raw, retries, ferr := h.fetch(ctx, client, sel, target, reqBody, sess, task.Throttle, &tr)
 		elapsed := time.Since(started).Milliseconds()
 
-		pr := PreviewResult{EndpointID: ep.ID, Name: ep.Name, URL: target, Status: status, Pagination: pg.Describe()}
+		pr := PreviewResult{EndpointID: ep.ID, Name: ep.Name, URL: maskURLSecrets(target), Status: status, Pagination: pg.Describe()}
 		pr.Request = buildPreviewRequest(sel, target, reqBody, sess, pg, &tr, retries, elapsed)
 		pr.Response = buildPreviewResponse(status, &tr, raw)
 		pr.Session = sessionSummary(task.Session, sess)
@@ -2587,23 +2647,45 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		pr.SessionTrace = buildSessionTrace(task.Session, sess, refreshed, scriptRan)
 		pr.Process = append(append([]string{}, prep...), endpointProcess(sel, pg, vars, &tr, retries, elapsed, reqBody)...)
 
+		// 这个接口自己的时间线：公共的前半段 + 变量 / 请求 / 响应 / 解析
+		tl := append([]PreviewStep{}, base...)
+		tl = append(tl, varsPreviewStep(vars))
+		tl = append(tl, requestPreviewStep(pr.Request))
+		tl = append(tl, responsePreviewStep(pr.Response))
+		finish := func() {
+			pr.Timeline = previewIndex(tl)
+			out = append(out, pr)
+		}
+
 		if ferr != nil {
 			pr.Error = ferr.Error()
 			pr.Hint = "检查 URL / 会话 / 限流状态"
-			out = append(out, pr)
+			tl = append(tl, PreviewStep{
+				Action: "parse", Title: "解析响应", Status: "error",
+				Message: "请求没成功，没有响应体可解析：" + ferr.Error(),
+			})
+			finish()
 			continue
 		}
 		root, perr := ParseJSONBody(string(raw))
 		if perr != nil {
 			pr.Error = "响应不是 JSON：" + perr.Error()
 			pr.Rows = []map[string]any{{"raw": truncate(string(raw), 500)}}
-			out = append(out, pr)
+			tl = append(tl, PreviewStep{
+				Action: "parse", Title: "解析响应", Status: "error",
+				Message: "响应不是 JSON：" + perr.Error() + "（下面按原始文本展示）",
+			})
+			finish()
 			continue
 		}
 		records, path, rerr := RecordsFrom(root, ep.RecordsPath)
 		if rerr != nil {
 			pr.Error = rerr.Error()
-			out = append(out, pr)
+			tl = append(tl, PreviewStep{
+				Action: "parse", Title: "解析响应", Status: "error",
+				Message: rerr.Error() + "；改「记录路径」指向真正的数组字段（如 data.list）",
+			})
+			finish()
 			continue
 		}
 		pr.RecordsPath = path
@@ -2630,7 +2712,23 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 			rows = append(rows, FlattenRow(rec, fields, vars))
 		}
 		pr.Rows = rows
-		out = append(out, pr)
+
+		parseDetails := map[string]string{
+			"记录路径": path,
+			"本页记录": strconv.Itoa(len(records)) + " 条",
+			"字段":   strings.Join(Columns(fields), "、"),
+			"分页":   pg.Describe(),
+		}
+		if pr.Total > 0 {
+			parseDetails["响应 total"] = strconv.Itoa(pr.Total) + "，预计 " + strconv.Itoa(pr.EstimatedPages) + " 页"
+		}
+		tl = append(tl, PreviewStep{
+			Action: "parse", Title: "解析响应", Status: "ok",
+			Target:  path,
+			Message: fmt.Sprintf("本页 %d 条记录，字段 %d 个，预览 %d 行", len(records), len(fields), len(rows)),
+			Details: parseDetails,
+		})
+		finish()
 	}
 	if endpointID != "" && !matched {
 		// 指定接口不存在时接口层返回空数组，前端只会显示「没有结果」，很容易误判成"抓不到数据"
@@ -2638,14 +2736,450 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 			EndpointID: endpointID,
 			Error:      "任务里没有这个接口",
 			Hint:       "可能已经被删除；返回任务列表刷新后再试",
+			Timeline: []PreviewStep{{
+				Index: 1, Action: "parse", Title: "查找接口", Status: "error",
+				Message: "任务里没有 ID 为 " + endpointID + " 的接口",
+			}},
 		})
 	}
 	if warning != "" {
 		for i := range out {
 			out[i].Warning = warning
+			for j := range out[i].Timeline {
+				if out[i].Timeline[j].Action == "session" && out[i].Timeline[j].Status == "ok" {
+					out[i].Timeline[j].Status = "warn"
+					out[i].Timeline[j].Message = warning
+				}
+			}
 		}
 	}
 	return out
+}
+
+/* ------------------------------------------------------ 试抓时间线各步骤 */
+
+// previewIndex 给时间线编号（从 1 开始），顺手把空状态补成 ok。
+func previewIndex(steps []PreviewStep) []PreviewStep {
+	for i := range steps {
+		steps[i].Index = i + 1
+		if strings.TrimSpace(steps[i].Status) == "" {
+			steps[i].Status = "ok"
+		}
+	}
+	return steps
+}
+
+// previewHeaderModeText 浏览器请求头覆盖策略的中文说明。
+func previewHeaderModeText(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "off":
+		return "不覆盖（只用接口里配置的请求头）"
+	case "auth":
+		return "只覆盖鉴权类请求头（Authorization / *token* / *auth*）"
+	default:
+		return "全部共享（除 Content-* / Host 等请求内容相关的头）"
+	}
+}
+
+// preloginPreviewSteps 前置动作（UI 自动化登录流程）这一步。
+//
+// 默认只标注配置、不真的跑（试抓要快，而且不该有副作用）；
+// opts.RunPrelogin 为 true 时才会真的在浏览器里点一遍，再导出登录后的会话。
+func (h *Harvester) preloginPreviewSteps(ctx context.Context, task *model.HarvestTask, opts PreviewOptions) []PreviewStep {
+	pl := task.Prelogin.Effective()
+	name := strings.TrimSpace(pl.RecordingName)
+	if name == "" {
+		name = pl.RecordingID
+	}
+	step := PreviewStep{
+		Action:  "prelogin",
+		Title:   "前置动作：在浏览器里执行「" + name + "」",
+		Target:  pl.ModeText() + " · 超时 " + strconv.Itoa(pl.TimeoutSeconds) + " 秒",
+		Details: h.preloginStepDetail(pl),
+	}
+	if !opts.RunPrelogin {
+		step.Status = "skip"
+		step.Message = "试抓默认不跑前置动作（避免每次预览都真的登录一次、触发验证码）。要拿最新会话点「试抓（含前置动作）」"
+		return []PreviewStep{step}
+	}
+	if h.prelogin == nil {
+		step.Status = "error"
+		step.Message = "服务没有装配 UI 自动化执行器，前置动作没跑"
+		return []PreviewStep{step}
+	}
+	start := time.Now()
+	runID, err := h.runPreloginQuietID(ctx, task)
+	step.DurationMS = time.Since(start).Milliseconds()
+	if runID != "" {
+		step.Details["运行 ID"] = runID
+		step.Screenshot = h.lastRunScreenshot(runID)
+	}
+	if err != nil {
+		step.Status = "error"
+		step.Message = err.Error()
+		return []PreviewStep{step}
+	}
+	step.Status = "ok"
+	step.Message = "前置动作执行完成，下面的 Cookie / 请求头就是登录后的最新值"
+	return []PreviewStep{step}
+}
+
+// preloginStepDetail 前置动作的配置明细：录制流程、步骤顺序（打开 → 输入 → 验证码 → 提交）。
+func (h *Harvester) preloginStepDetail(pl model.HarvestPrelogin) map[string]string {
+	out := map[string]string{}
+	if h.store != nil {
+		if rec, err := h.store.GetRecording(pl.RecordingID); err == nil {
+			if strings.TrimSpace(rec.Name) != "" {
+				out["录制流程"] = rec.Name
+			}
+			if strings.TrimSpace(rec.StartURL) != "" {
+				out["开始页面"] = rec.StartURL
+			}
+			names := make([]string, 0, len(rec.Steps))
+			for _, st := range rec.Steps {
+				names = append(names, preloginActionText(st))
+			}
+			if len(names) > 0 {
+				out["步骤顺序"] = strings.Join(names, " → ")
+			}
+		}
+	}
+	if len(pl.Vars) > 0 {
+		out["登录变量"] = varKeysText(pl.Vars) + "（值不会展示）"
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return out
+}
+
+// preloginActionText 把录制步骤翻译成一句人话，给时间线展示用。
+func preloginActionText(st model.Step) string {
+	action := strings.ToLower(strings.TrimSpace(st.Action))
+	label := map[string]string{
+		"navigate": "打开页面", "open": "打开页面", "goto": "打开页面",
+		"input": "输入", "fill": "输入", "type": "输入",
+		"click": "点击", "submit": "提交",
+		"captcha": "AI 识别验证码并填入",
+		"select":  "选择", "check": "勾选", "uncheck": "取消勾选",
+		"press": "按键", "wait": "等待", "screenshot": "截图",
+	}[action]
+	if label == "" {
+		label = st.Action
+	}
+	hint := strings.TrimSpace(st.Note)
+	if hint == "" {
+		hint = strings.TrimSpace(st.Annotation)
+	}
+	if hint != "" {
+		return label + "（" + truncate(hint, 24) + "）"
+	}
+	return label
+}
+
+// lastRunScreenshot UI 自动化运行目录里最新的一张截图（前置动作跑完时给个可点的缩略图）。
+func (h *Harvester) lastRunScreenshot(runID string) string {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(h.dataDir) == "" {
+		return ""
+	}
+	dir := filepath.Join(h.dataDir, "runs", runID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	best := ""
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".png") && name > best {
+			best = name
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	return "/data/runs/" + url.PathEscape(runID) + "/" + url.PathEscape(best)
+}
+
+// sessionPreviewSteps 会话来源这一步：从哪拿的、有多少 Cookie / 请求头。
+func sessionPreviewSteps(task *model.HarvestTask, sess resolvedSession, sessErr error) []PreviewStep {
+	step := PreviewStep{
+		Action:  "session",
+		Title:   "会话：" + sessionLabel(task.Session),
+		Target:  sessionSummary(task.Session, sess),
+		Details: map[string]string{"会话来源": task.Session.SourceText(), "请求头覆盖": previewHeaderModeText(sess.headerMode)},
+	}
+	if strings.TrimSpace(task.Session.Host) != "" {
+		step.Details["站点"] = task.Session.Host
+	}
+	if sess.cookieCount > 0 {
+		step.Details["Cookie"] = strconv.Itoa(sess.cookieCount) + " 个（" + strings.Join(cookieNameList(sess), "、") + "）"
+	} else {
+		step.Details["Cookie"] = "0 个"
+	}
+	if len(sess.headers) > 0 {
+		step.Details["登录态请求头"] = strconv.Itoa(len(sess.headers)) + " 个（" + strings.Join(sortedStringKeys(sess.headers), "、") + "）"
+	}
+	if sess.token != "" {
+		step.Details["Token"] = maskSecret(sess.token) + "（" + strconv.Itoa(len(sess.token)) + " 字符）"
+	}
+	if sessErr != nil {
+		step.Status = "warn"
+		step.Message = "没拿到登录态：" + sessErr.Error() + "；本次按无登录态试抓，返回 401/403 说明这个接口需要登录"
+	} else {
+		step.Message = "会话已就绪，后面所有接口共用这一份 Cookie / 请求头 / 公共参数"
+	}
+	return []PreviewStep{step}
+}
+
+// loginPreviewSteps 来源是「登录接口」时，把这次登录调用记成时间线的一步。
+func loginPreviewSteps(tr *LoginTrace) []PreviewStep {
+	if tr == nil {
+		return nil
+	}
+	d := map[string]string{}
+	if strings.TrimSpace(tr.URL) != "" {
+		d["登录接口"] = strings.TrimSpace(tr.Method) + " " + tr.URL
+	}
+	if tr.Body != "" {
+		d["请求体（脱敏）"] = truncate(tr.Body, 1200)
+	}
+	if tr.Status != 0 {
+		d["状态"] = strconv.Itoa(tr.Status) + " " + http.StatusText(tr.Status)
+	}
+	if tr.TokenPath != "" {
+		d["token 取值路径"] = tr.TokenPath
+	}
+	if tr.TokenPreview != "" {
+		d["token（脱敏）"] = tr.TokenPreview + "（" + strconv.Itoa(tr.TokenLength) + " 字符）"
+	}
+	if tr.Param != "" {
+		d["写入公共参数"] = tr.Param
+	}
+	if tr.Header != "" {
+		d["绑定请求头"] = tr.Header + " " + tr.Prefix
+	}
+	if len(tr.Cookies) > 0 {
+		d["Set-Cookie"] = strings.Join(tr.Cookies, "、")
+	}
+	if tr.BodyPreview != "" {
+		d["响应预览"] = truncate(tr.BodyPreview, 800)
+	}
+	if tr.Note != "" {
+		d["说明"] = tr.Note
+	}
+	step := PreviewStep{
+		Action:     "login",
+		Title:      "调登录接口换 token",
+		Target:     strings.TrimSpace(tr.Method + " " + tr.URL),
+		DurationMS: tr.DurationMS,
+		Details:    d,
+	}
+	if tr.Error != "" {
+		step.Status = "error"
+		step.Message = tr.Error
+		return []PreviewStep{step}
+	}
+	step.Status = "ok"
+	msg := "登录成功"
+	if tr.TokenPreview != "" {
+		msg += "，token 已写入公共参数 " + orDefaultStr(tr.Param, "token") + " 并绑定到请求头 " + orDefaultStr(tr.Header, "Authorization")
+	}
+	if len(tr.Cookies) > 0 {
+		msg += "，顺带收下 " + strconv.Itoa(len(tr.Cookies)) + " 个 Set-Cookie"
+	}
+	if tr.Cached {
+		msg += "（命中缓存，本次没真的再登一次）"
+	}
+	step.Message = msg
+	return []PreviewStep{step}
+}
+
+// headerPreviewSteps 从内置浏览器导出的登录态请求头（值全部脱敏）。
+func headerPreviewSteps(sess resolvedSession) []PreviewStep {
+	if len(sess.headers) == 0 {
+		return nil
+	}
+	d := make(map[string]string, len(sess.headers))
+	for _, k := range sortedStringKeys(sess.headers) {
+		d[k] = maskHeaderValue(k, sess.headers[k])
+	}
+	return []PreviewStep{{
+		Action:  "headers",
+		Title:   "从浏览器导出登录态请求头",
+		Target:  strconv.Itoa(len(sess.headers)) + " 个（同名会覆盖接口里录制下来的旧值）",
+		Details: d,
+		Message: "这些是浏览器里真实在用的值，抓取时优先于接口配置",
+	}}
+}
+
+// refreshPreviewSteps 登录后刷新公共参数这一步：哪个参数被换成了新值。
+func refreshPreviewSteps(task *model.HarvestTask, sess resolvedSession, refreshed []string) []PreviewStep {
+	if task.Common == nil || !task.Common.Refresh.Active() {
+		return nil
+	}
+	rf := task.Common.Refresh.Effective()
+	d := map[string]string{"token 参数": rf.TokenParam}
+	if len(rf.Cookies) > 0 {
+		d["Cookie → 参数"] = previewKVText(rf.Cookies)
+	}
+	if len(rf.Storage) > 0 {
+		d["存储 → 参数"] = previewKVText(rf.Storage)
+	}
+	for _, item := range refreshed {
+		parts := strings.SplitN(item, ":", 2)
+		if len(parts) != 2 {
+			d[item] = ""
+			continue
+		}
+		switch parts[0] {
+		case "参数":
+			d["参数 "+parts[1]] = maskIfSensitive(parts[1], sess.params[parts[1]])
+		case "绑定":
+			d["自动补绑定"] = "header:" + parts[1]
+		}
+	}
+	step := PreviewStep{
+		Action:  "refresh",
+		Title:   "登录后刷新公共参数",
+		Target:  "token → " + rf.TokenParam,
+		Details: d,
+	}
+	if len(refreshed) == 0 {
+		step.Status = "warn"
+		step.Message = "没有取到新的值（浏览器里没找到 token / 对应 Cookie），继续用公共参数里的旧值"
+		return []PreviewStep{step}
+	}
+	step.Message = "已把最新值写进公共参数：" + strings.Join(refreshed, "、") + "；参数绑定会在每次请求前覆盖到对应位置"
+	return []PreviewStep{step}
+}
+
+// bindingPreviewSteps 参数绑定每一步：哪个参数 → 写到哪个请求头 / Cookie / query / 请求体。
+func bindingPreviewSteps(sess resolvedSession) []PreviewStep {
+	out := make([]PreviewStep, 0, len(sess.bindings))
+	for _, b := range sess.bindings {
+		e := b.Effective()
+		if !e.Valid() {
+			continue
+		}
+		val := expand(e.Template, sess.params)
+		out = append(out, PreviewStep{
+			Action:    "bindings",
+			Title:     "参数绑定：" + e.Param + " → " + e.Target + ":" + e.Name,
+			Target:    e.Target + ":" + e.Name,
+			ValueUsed: maskIfSensitive(e.Name, val),
+			Details:   map[string]string{"模板": e.Template, "实际值（脱敏）": maskIfSensitive(e.Name, val)},
+			Message:   "每次请求前用公共参数的最新值覆盖，优先级最高",
+		})
+	}
+	return out
+}
+
+// scriptPreviewSteps 登录后公共脚本这一步。
+func scriptPreviewSteps(task *model.HarvestTask, ran bool) []PreviewStep {
+	if task.Common == nil || strings.TrimSpace(task.Common.Script) == "" {
+		return nil
+	}
+	step := PreviewStep{
+		Action:  "script",
+		Title:   "执行登录后公共脚本",
+		Details: map[string]string{"脚本长度": strconv.Itoa(len(task.Common.Script)) + " 字节"},
+	}
+	if ran {
+		step.Message = "脚本已在内置浏览器里执行，产出的参数 / 请求头已并入会话"
+	} else {
+		step.Status = "skip"
+		step.Message = "内置浏览器不可用，脚本跳过（公共参数里的静态值仍然生效）"
+	}
+	return []PreviewStep{step}
+}
+
+// varsPreviewStep 变量展开：{{变量}} → 这一次请求真正用到的值。
+func varsPreviewStep(vars map[string]string) PreviewStep {
+	d := make(map[string]string, len(vars))
+	for _, k := range sortedStringKeys(vars) {
+		d[k] = maskIfSensitive(k, vars[k])
+	}
+	return PreviewStep{
+		Action:  "vars",
+		Title:   "变量展开（{{变量名}} → 实际值）",
+		Target:  strconv.Itoa(len(vars)) + " 个变量",
+		Details: d,
+	}
+}
+
+// requestPreviewStep 这一次真正发出去的请求。
+func requestPreviewStep(info *PreviewRequestInfo) PreviewStep {
+	if info == nil {
+		return PreviewStep{Action: "request", Title: "发送请求", Status: "skip", Message: "没有请求信息"}
+	}
+	d := make(map[string]string, len(info.Headers)+len(info.QueryParams)+2)
+	for _, k := range sortedStringKeys(info.Headers) {
+		d["Header "+k] = info.Headers[k]
+	}
+	for _, k := range sortedStringKeys(info.QueryParams) {
+		d["Query "+k] = info.QueryParams[k]
+	}
+	if info.Body != "" {
+		d["请求体（脱敏）"] = truncate(info.Body, 2000)
+	}
+	if info.Retries > 0 {
+		d["重试"] = strconv.Itoa(info.Retries) + " 次"
+	}
+	return PreviewStep{
+		Action:     "request",
+		Title:      "发送请求 " + info.Method,
+		Target:     info.URL,
+		DurationMS: info.DurationMS,
+		Details:    d,
+	}
+}
+
+// responsePreviewStep 这一次收回来的响应。
+func responsePreviewStep(resp *PreviewResponseInfo) PreviewStep {
+	if resp == nil {
+		return PreviewStep{Action: "response", Title: "收到响应", Status: "skip", Message: "没有响应信息"}
+	}
+	status := "ok"
+	switch {
+	case resp.Status >= 400:
+		status = "error"
+	case resp.Status >= 300:
+		status = "warn"
+	}
+	d := map[string]string{"响应大小": sizeText(resp.Size)}
+	if resp.ContentType != "" {
+		d["Content-Type"] = resp.ContentType
+	}
+	for _, k := range sortedStringKeys(resp.Headers) {
+		d["Header "+k] = resp.Headers[k]
+	}
+	if resp.BodyPreview != "" {
+		d["响应体预览（脱敏）"] = truncate(resp.BodyPreview, 2000)
+	}
+	step := PreviewStep{
+		Action:  "response",
+		Title:   "收到响应",
+		Target:  strconv.Itoa(resp.Status) + " " + resp.StatusText,
+		Status:  status,
+		Details: d,
+	}
+	if resp.Status >= 400 {
+		step.Message = "服务端拒绝了这次请求：会话失效 / 缺权限 / 参数不对，先看上面的请求头和会话时间线"
+	}
+	return step
+}
+
+// previewKVText map 转 "k=v、k2=v2"（给时间线明细用）。
+func previewKVText(m map[string]string) string {
+	keys := sortedStringKeys(m)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	return strings.Join(parts, "、")
 }
 
 // buildPreviewRequest 组装「实际发出去的请求」。以 fetch 记录下来的最终报文为准，
@@ -2665,7 +3199,7 @@ func buildPreviewRequest(ep model.HarvestEndpoint, target, body string, sess res
 			info.Method = tr.Method
 		}
 		if tr.URL != "" {
-			info.URL = tr.URL
+			info.URL = maskURLSecrets(tr.URL)
 		}
 		if len(tr.Headers) > 0 {
 			info.Headers = maskHeaders(tr.Headers)
@@ -2767,7 +3301,7 @@ func endpointProcess(ep model.HarvestEndpoint, pg *Paginator, vars map[string]st
 			attempts = tr.Attempts
 		}
 	}
-	reqLine := "请求：" + method + " " + target
+	reqLine := "请求：" + method + " " + maskURLSecrets(target)
 	if ct != "" {
 		reqLine += "（Content-Type: " + ct + "）"
 	}
@@ -2805,6 +3339,30 @@ func sessionSummary(s model.HarvestSession, sess resolvedSession) string {
 }
 
 /* ------------------------------------------------------ 试抓明细的脱敏 */
+
+// maskURLSecrets 把 URL query 里的 token / sid / session 这类敏感值打码。
+// 参数名和普通参数（page / size / tenant）原样保留，方便核对“到底带了哪些参数”。
+func maskURLSecrets(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.RawQuery == "" {
+		return raw
+	}
+	q := u.Query()
+	changed := false
+	for k, vs := range q {
+		for i, v := range vs {
+			if masked := maskIfSensitive(k, v); masked != v {
+				vs[i] = masked
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return raw
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
 
 // maskSecret 保留首尾少量字符，中间打码：既够确认"是不是同一个值"，又不泄漏明文。
 func maskSecret(v string) string {
