@@ -1042,3 +1042,20 @@ tbody tr.is-selected{ background:#f5f5ff; }
 .rec-steps{ margin-top:10px; }
 .pl-steps{ margin:0; padding-left:18px; display:grid; gap:4px; font-size:12px; color:var(--text-2); }
 .pl-steps li{ line-height:1.5; }
+
+/* 前置动作流程编辑器（采集任务里直接新建 / 编辑，不必先去录制） */
+.pl-pick{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.pl-pick select{ flex:1; min-width:200px; }
+.pl-edit-head, .pl-edit-row{ display:grid; grid-template-columns:112px minmax(180px,1.7fr) minmax(140px,1.2fr) 74px minmax(110px,1fr) minmax(104px,.8fr) 88px; gap:6px; align-items:center; }
+.pl-edit-head{ font-size:12px; color:var(--text-2); padding:0 4px 6px; }
+.pl-edit-list{ display:grid; gap:6px; max-height:46vh; overflow:auto; padding:2px; }
+.pl-edit-row .input{ min-width:0; }
+.pl-edit-row .icon-btn{ width:26px; height:26px; padding:0; font-size:12px; line-height:1; }
+.pl-edit-ops{ display:flex; gap:2px; justify-content:flex-end; }
+.pl-edit-tools{ margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.pl-edit-tools .muted{ font-size:12px; }
+@media (max-width:900px){
+  .pl-edit-head{ display:none; }
+  .pl-edit-row{ grid-template-columns:1fr 1fr; }
+  .pl-edit-ops{ justify-content:flex-end; }
+}

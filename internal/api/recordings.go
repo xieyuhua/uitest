@@ -133,6 +133,98 @@ func (s *Server) reorderSteps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+/* --------------------------------------------------- 整段写入步骤（流程编辑器） */
+
+// 流程编辑器里能选的动作（与 internal/engine 的执行分支一一对应）。
+var stepActionNames = map[string]string{
+	"navigate": "打开页面", "input": "输入", "click": "点击", "select": "选择",
+	"check": "勾选", "uncheck": "取消勾选", "key": "按键", "hover": "悬停",
+	"wait": "等待", "upload": "上传", "captcha": "AI 验证码", "assert": "断言", "script": "脚本",
+}
+
+// 必须给出元素定位的动作（AI 验证码可以留空，执行时按图片特征自动找）。
+var stepNeedsLocator = map[string]bool{
+	"input": true, "click": true, "select": true, "check": true,
+	"uncheck": true, "hover": true, "upload": true,
+}
+
+func stepActionList() string {
+	order := []string{"navigate", "input", "click", "select", "check", "uncheck", "key",
+		"hover", "wait", "upload", "captcha", "assert", "script"}
+	out := make([]string, 0, len(order))
+	for _, a := range order {
+		out = append(out, a+"（"+stepActionNames[a]+"）")
+	}
+	return strings.Join(out, "、")
+}
+
+// targetHasHint 判断步骤是否带了可用的元素语义（label / 文本 / placeholder / name 等）。
+func targetHasHint(t model.Target) bool {
+	return strings.TrimSpace(t.Label+t.Text+t.Placeholder+t.Aria+t.Name+t.StableID+t.TestAttr+
+		t.FormItem+t.Column+t.RowText) != ""
+}
+
+type saveStepsReq struct {
+	// replace（默认）：整段替换；append：追加到现有步骤之后
+	Mode  string       `json:"mode"`
+	Steps []model.Step `json:"steps"`
+}
+
+// saveSteps POST /api/recordings/{id}/steps/batch
+//
+// 采集任务里的「自己创建 UI 流程」一次保存整段步骤：前端不用逐步调接口，
+// 也不会出现保存到一半只写进去半步的情况（store 里是整体替换）。
+func (s *Server) saveSteps(w http.ResponseWriter, r *http.Request) {
+	var req saveStepsReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "replace"
+	}
+	if mode != "replace" && mode != "append" {
+		writeErr(w, http.StatusBadRequest, "mode 只能是 replace 或 append")
+		return
+	}
+	if mode == "replace" && len(req.Steps) == 0 {
+		writeErr(w, http.StatusBadRequest, "流程至少要有一步；要清空请到 UI 自动化里删除录制")
+		return
+	}
+	if len(req.Steps) > 200 {
+		writeErr(w, http.StatusBadRequest, "一次最多保存 200 步")
+		return
+	}
+	for i := range req.Steps {
+		st := &req.Steps[i]
+		n := i + 1
+		st.Action = strings.ToLower(strings.TrimSpace(st.Action))
+		if _, ok := stepActionNames[st.Action]; !ok {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("第 %d 步的动作「%s」不支持，可选：%s", n, st.Action, stepActionList()))
+			return
+		}
+		if st.Action == "navigate" && strings.TrimSpace(st.Value) == "" {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("第 %d 步是「打开页面」，必须在输入值里填 URL", n))
+			return
+		}
+		if st.Action == "wait" && strings.TrimSpace(st.Value) == "" {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("第 %d 步是「等待」，请填毫秒数或要等待出现的元素定位", n))
+			return
+		}
+		if stepNeedsLocator[st.Action] && strings.TrimSpace(st.Locator.Value) == "" && !targetHasHint(st.Target) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("第 %d 步是「%s」，缺少元素定位（如 css=#username 或 text=登录）", n, stepActionNames[st.Action]))
+			return
+		}
+	}
+	rec, err := s.DB.SaveSteps(r.PathValue("id"), req.Steps, mode == "append")
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // duplicateRecording POST /api/recordings/{id}/duplicate
 func (s *Server) duplicateRecording(w http.ResponseWriter, r *http.Request) {
 	var req struct {

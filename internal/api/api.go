@@ -57,6 +57,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/recordings/batch-delete", s.batchDeleteRecordings)
 	mux.HandleFunc("DELETE /api/recordings", s.clearRecordings)
 	mux.HandleFunc("POST /api/recordings/{id}/steps", s.addStep)
+	// 整段写入步骤：采集任务里「自己创建 UI 流程」一次保存
+	mux.HandleFunc("POST /api/recordings/{id}/steps/batch", s.saveSteps)
 	mux.HandleFunc("PATCH /api/recordings/{id}/steps/{sid}", s.patchStep)
 	mux.HandleFunc("DELETE /api/recordings/{id}/steps/{sid}", s.deleteStep)
 	mux.HandleFunc("POST /api/recordings/{id}/reorder", s.reorderSteps)

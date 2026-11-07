@@ -333,8 +333,20 @@ func (db *DB) AddStep(recordingID string, s model.Step) (model.Step, error) {
 	return s, nil
 }
 
-func defaultAnnotation(s model.Step) string {
+// stepTargetName 优先用元素语义描述；手工建的流程只填了定位时，退回定位本身，
+// 免得预览里全是「元素」看不出区别。
+func stepTargetName(s model.Step) string {
 	name := s.Target.Describe()
+	if name == "元素" {
+		if v := strings.TrimSpace(s.Locator.Value); v != "" {
+			return v
+		}
+	}
+	return name
+}
+
+func defaultAnnotation(s model.Step) string {
+	name := stepTargetName(s)
 	switch s.Action {
 	case "click":
 		return "点击【" + name + "】"
@@ -358,6 +370,8 @@ func defaultAnnotation(s model.Step) string {
 		return "等待 " + s.Value
 	case "assert":
 		return "断言 " + s.Value
+	case "captcha":
+		return "识别验证码 " + name
 	default:
 		return s.Action + " " + name
 	}
@@ -483,6 +497,53 @@ func (db *DB) Reorder(recordingID string, stepIDs []string) (model.Recording, er
 		if !ok {
 			return model.Recording{}, errors.New("step_ids 含有未知步骤: " + id)
 		}
+		next = append(next, s)
+	}
+	r.Steps = next
+	reindex(r)
+	r.UpdatedAt = time.Now()
+	db.markDirty()
+	return r.Clone(), nil
+}
+
+// SaveSteps 整段写入录制步骤（采集任务里「自己创建 UI 流程」用）。
+//
+//	appendMode=false：替换全部步骤（流程编辑器保存整段）
+//	appendMode=true ：追加到现有步骤之后
+//
+// 传入的 ID 只要非空且不重复就保留（改其中一步不必整段换 ID），index 一律按提交顺序重排。
+func (db *DB) SaveSteps(recordingID string, steps []model.Step, appendMode bool) (model.Recording, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	r, ok := db.data.Recordings[recordingID]
+	if !ok {
+		return model.Recording{}, ErrNotFound
+	}
+	next := make([]model.Step, 0, len(steps)+len(r.Steps))
+	seen := map[string]bool{}
+	if appendMode {
+		for _, s := range r.Steps {
+			seen[s.ID] = true
+			next = append(next, s)
+		}
+	}
+	for _, s := range steps {
+		s.Action = strings.ToLower(strings.TrimSpace(s.Action))
+		s.ID = strings.TrimSpace(s.ID)
+		if s.ID == "" || seen[s.ID] {
+			s.ID = randID("stp_")
+		}
+		seen[s.ID] = true
+		if s.CreatedAt.IsZero() {
+			s.CreatedAt = time.Now()
+		}
+		if strings.TrimSpace(s.Annotation) == "" {
+			s.Annotation = defaultAnnotation(s)
+		}
+		if db.data.Settings.Assist.AutoDataKey {
+			s.DataKey = improveDataKey(s)
+		}
+		s.RecordingID = recordingID
 		next = append(next, s)
 	}
 	r.Steps = next

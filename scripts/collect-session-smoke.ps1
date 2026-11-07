@@ -153,11 +153,12 @@ try {
     @{ action = "click"; locator = @{ strategy = "id"; value = "submit" }; annotation = "点登录" },
     @{ action = "wait"; value = "2500"; annotation = "等跳转到订单列表页" }
   )
-  foreach ($st in $steps) { $null = Post-Json "/api/recordings/$rid/steps" $st }
+  # 采集任务里「自己创建 UI 流程」走的就是这个整段写入接口
+  $null = Post-Json "/api/recordings/$rid/steps/batch" @{ mode = "replace"; steps = $steps }
   $recFull = Try-Get "$base/api/recordings/$rid"
   $stepCount = 0
   if ($recFull.ok) { $stepCount = @($recFull.body.steps).Count }
-  Report "交步骤（导航 / 输入 / 点击 / 等待）" ($stepCount -eq 5) ("步骤=" + $stepCount)
+  Report "整段写入步骤（steps/batch：导航 / 输入 / 点击 / 等待）" ($stepCount -eq 5) ("步骤=" + $stepCount)
 
   # ---------------------------------------------------------------- 5. 登录后刷新 + 试抓
   Write-Host ""

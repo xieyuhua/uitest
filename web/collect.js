@@ -348,7 +348,7 @@
         '在登录后的内置浏览器页面里执行，可读 localStorage / cookie；返回 {"params":{…},"headers":{…}}，' +
         '返回 {"token":"…"} 会自动写成 Authorization: Bearer &lt;token&gt;') +
       '</div>' +
-      '<div class="ds-block"><div class="ds-block-title"><span>前置动作（UI 自动化）</span>' +
+      '<div class="ds-block" data-pl-block="' + pfx + '"><div class="ds-block-title"><span>前置动作（UI 自动化）</span>' +
       '<span class="muted">采集之前先在浏览器里把该点的点完：打开网页 → 输入 → AI 验证码 → 点击提交</span></div>' +
       '<label class="check-line"><input type="checkbox" id="' + pfx + '_plon"' + (pl.enabled ? ' checked' : '') +
       '> 运行前先跑一遍前置动作（Cookie / 请求头随登录状态变化就靠它）</label>' +
@@ -359,8 +359,13 @@
         textareaHtml(pfx + '_plvars', varsToText(pl.vars), 3, 'placeholder=\'password={{env:SITE_PASS}}\''),
         '录制器会把密码框脱敏成 {{password}}：这里必须填 password=真实密码，回放时才真的能登录（值支持 {{env:XXX}}）') +
       '<div class="form-grid">' +
-      fld('前置动作录制', '<select class="input" id="' + pfx + '_plrec" data-rec>' + recOptions(pl.recording_id) + '</select>',
-        '在「UI 自动化」里录一段：打开登录页 → 输账号密码 →（验证码）→ 点登录；运行时真的在浏览器里走一遍') +
+      fld('前置动作流程', '<div class="pl-pick">' +
+          '<select class="input" id="' + pfx + '_plrec" data-rec>' + recOptions(pl.recording_id) + '</select>' +
+          '<button class="btn btn--sm" type="button" data-pl-act="new">＋ 新建流程</button>' +
+          '<button class="btn btn--sm" type="button" data-pl-act="edit">编辑</button>' +
+          '<button class="btn btn--sm" type="button" data-pl-act="record" title="在 UI 自动化里录制（新窗口打开，不会丢掉当前表单）">去录制</button>' +
+        '</div>',
+        '两种方式：① 选「UI 自动化」里已经录好的流程；② 点「新建流程」直接在这里搭（打开网页 → 输入 → AI 验证码 → 点击提交），不用先跳去录制') +
       fld('触发时机', selectHtml(pfx + '_plmode', [['always', '每次运行前都跑'], ['on-fail', '只在会话失效（401/403）时跑']], pl.mode || 'always')) +
       fld('超时（秒）', numHtml(pfx + '_pltimeout', pl.timeout_seconds || 180, 'min="30" max="3600"')) +
       '</div>' +
@@ -583,7 +588,7 @@
   function paintPreloginSteps(box, rec) {
     var steps = (rec && rec.steps) || [];
     if (!steps.length) {
-      box.innerHTML = '<span class="muted">这个录制里还没有步骤</span>';
+      box.innerHTML = '<span class="muted">这个流程里还没有步骤：点「编辑」补几步（打开页面 → 输入 → 点击）</span>';
       return;
     }
     box.innerHTML = '<div class="field-hint" style="margin:0 0 6px">执行顺序（共 ' + steps.length + ' 步）：</div>' +
@@ -600,7 +605,7 @@
     var sel = root.querySelector('#' + pfx + '_plrec');
     if (!box) return;
     var id = sel ? sel.value : '';
-    if (!id) { box.innerHTML = '<span class="muted">还没选前置动作录制</span>'; return; }
+    if (!id) { box.innerHTML = '<span class="muted">还没选流程：下拉选一段录制，或点「＋ 新建流程」直接在这里建</span>'; return; }
     if (PL_STEPS_CACHE[id]) { paintPreloginSteps(box, PL_STEPS_CACHE[id]); return; }
     box.innerHTML = '<span class="muted">加载步骤…</span>';
     api('GET', '/api/recordings/' + encodeURIComponent(id), undefined, { silent: true })
@@ -612,6 +617,255 @@
       .catch(function () { box.innerHTML = '<span class="muted">步骤加载失败</span>'; });
   }
 
+  /* --- 前置动作流程编辑器：在采集任务里直接新建 / 编辑 UI 流程 ------------------ */
+
+  var PL_LOCATOR_STRATEGIES = {
+    css: 1, xpath: 1, text: 1, label: 1, placeholder: 1, name: 1, id: 1,
+    uid: 1, role: 1, attr: 1, testid: 1
+  };
+
+  var PL_ACTION_ORDER = ['navigate', 'input', 'click', 'select', 'check', 'uncheck', 'key',
+    'hover', 'wait', 'upload', 'captcha', 'assert', 'script'];
+
+  function plActionOptions(cur) {
+    return PL_ACTION_ORDER.map(function (a) {
+      return '<option value="' + a + '"' + (a === cur ? ' selected' : '') + '>' + esc(PL_ACTION_LABEL[a]) + '</option>';
+    }).join('');
+  }
+
+  /** 步骤 → 编辑框里的一行定位文本（css 省略前缀，其它策略写成 strategy=value） */
+  function stepLocatorText(s) {
+    s = s || {};
+    var loc = s.locator || {};
+    if (loc.value) {
+      return (loc.strategy && loc.strategy !== 'css' ? loc.strategy + '=' : '') + loc.value;
+    }
+    var t = s.target || {};
+    if (t.placeholder) return 'placeholder=' + t.placeholder;
+    if (t.label) return 'label=' + t.label;
+    if (t.text) return 'text=' + t.text;
+    if (t.name) return 'name=' + t.name;
+    if (t.stable_id) return 'css=#' + t.stable_id;
+    return '';
+  }
+
+  /** 编辑框里的一行定位文本 → {strategy,value}；不写前缀按 css */
+  function parseStepLocator(text) {
+    text = String(text || '').trim();
+    if (!text) return null;
+    var m = /^([a-zA-Z][a-zA-Z0-9_-]*)\s*[:=]\s*([\s\S]+)$/.exec(text);
+    if (m && PL_LOCATOR_STRATEGIES[m[1].toLowerCase()]) {
+      return { strategy: m[1].toLowerCase(), value: m[2].trim() };
+    }
+    return { strategy: 'css', value: text };
+  }
+
+  function plRowHtml(s) {
+    s = s || {};
+    var act = s.action || 'input';
+    return '<div class="pl-edit-row" data-row>' +
+      '<select class="input" data-k="action">' + plActionOptions(act) + '</select>' +
+      '<input class="input" data-k="locator" value="' + esc(stepLocatorText(s)) + '" placeholder="css=#user / text=登录 / placeholder=手机号">' +
+      '<input class="input" data-k="value" value="' + esc(s.value || '') + '" placeholder="输入值 / 页面 URL / 毫秒数">' +
+      '<input class="input" type="number" data-k="wait" value="' + esc(s.wait_ms || '') + '" placeholder="0">' +
+      '<input class="input" data-k="annotation" value="' + esc(s.annotation || '') + '" placeholder="说明（可选）">' +
+      '<input class="input" data-k="note" value="' + esc(s.note || '') + '" placeholder="验证码提示">' +
+      '<span class="pl-edit-ops">' +
+      '<button class="icon-btn" type="button" data-k="up" title="上移">↑</button>' +
+      '<button class="icon-btn" type="button" data-k="down" title="下移">↓</button>' +
+      '<button class="icon-btn" type="button" data-k="del" title="删除">✕</button>' +
+      '</span>' +
+      '</div>';
+  }
+
+  /** 读编辑表格 → Step[]（只带用户填的字段，其余交给后端补默认值） */
+  function readPlEditorRows(list) {
+    var rows = Array.prototype.slice.call((list || document).querySelectorAll('[data-row]'));
+    return rows.map(function (row) {
+      var g = function (k) {
+        var el = row.querySelector('[data-k="' + k + '"]');
+        return el ? el.value : '';
+      };
+      var step = {
+        action: String(g('action') || '').trim(),
+        annotation: String(g('annotation') || '').trim(),
+        value: String(g('value') || ''),
+        note: String(g('note') || '').trim()
+      };
+      var wait = parseInt(g('wait'), 10);
+      if (!isNaN(wait) && wait > 0) step.wait_ms = wait;
+      var loc = parseStepLocator(g('locator'));
+      if (loc) step.locator = loc;
+      return step;
+    });
+  }
+
+  /** 与后端一致的校验，错误直接指到第几步 */
+  function plStepError(step, n) {
+    var label = PL_ACTION_LABEL[step.action] || step.action;
+    if (!step.action) return '第 ' + n + ' 步还没选动作';
+    if (step.action === 'navigate' && !String(step.value || '').trim()) {
+      return '第 ' + n + ' 步是「打开页面」，请把 URL 填在「值」里';
+    }
+    if (step.action === 'wait' && !String(step.value || '').trim()) {
+      return '第 ' + n + ' 步是「等待」，请填毫秒数（如 2000）或要等待出现的元素定位';
+    }
+    if (['input', 'click', 'select', 'check', 'uncheck', 'hover', 'upload'].indexOf(step.action) >= 0 &&
+      !(step.locator && step.locator.value)) {
+      return '第 ' + n + ' 步（' + label + '）缺少元素定位，例如 css=#username 或 text=登录';
+    }
+    return '';
+  }
+
+  function openPreloginEditor(root, pfx, mode) {
+    var sel = root.querySelector('#' + pfx + '_plrec');
+    var recId = sel ? sel.value : '';
+    if (mode === 'edit') {
+      if (!recId) {
+        toast('先在下拉里选一个流程；没有就点「＋ 新建流程」', 'info');
+        return;
+      }
+      api('GET', '/api/recordings/' + encodeURIComponent(recId), undefined, { silent: true })
+        .then(function (res) {
+          var rec = (res && res.data) ? res.data : res;
+          openPlEditorModal(root, pfx, 'edit', rec || {});
+        })
+        .catch(function () { toast('流程加载失败，看服务端日志', 'error'); });
+      return;
+    }
+    openPlEditorModal(root, pfx, 'new', { name: '', start_url: '', steps: [] });
+  }
+
+  function openPlEditorModal(root, pfx, mode, rec) {
+    var isNew = mode !== 'edit';
+    var title = isNew ? '新建 UI 流程（前置动作）' : '编辑 UI 流程：' + (rec.name || '');
+    var body = '' +
+      '<div class="form-grid">' +
+      fld('流程名称', inputHtml('pl_ed_name', rec.name || '登录流程', 'placeholder="登录流程"')) +
+      fld('起始页（可选）', inputHtml('pl_ed_start', rec.start_url || '', 'placeholder="https://example.com/login"')) +
+      '</div>' +
+      '<div class="field-hint" style="margin:6px 0 10px;line-height:1.6">' +
+      '元素定位支持 <b>css=</b> / <b>text=</b> / <b>placeholder=</b> / <b>label=</b> / <b>name=</b> / <b>xpath=</b> / <b>uid=</b>，不写前缀按 css 处理。' +
+      'AI 验证码那一行的「元素定位」填<b>验证码图片</b>，「验证码提示」可写「4 位数字」，执行时识别后自动填进同表单输入框。' +
+      '不确定定位？先「＋ 登录样例」，再把里面的选择器改成你页面上的。' +
+      '</div>' +
+      '<div class="pl-edit-head"><span>动作</span><span>元素定位</span><span>值 / URL / 毫秒</span><span>等待ms</span>' +
+      '<span>说明</span><span>验证码提示</span><span>操作</span></div>' +
+      '<div class="pl-edit-list" id="pl_ed_list"></div>' +
+      '<div class="pl-edit-tools">' +
+      '<button class="btn btn--sm" type="button" data-pl-edit="add">＋ 添加步骤</button>' +
+      '<button class="btn btn--sm" type="button" data-pl-edit="captcha">＋ AI 验证码</button>' +
+      '<button class="btn btn--sm" type="button" data-pl-edit="sample">＋ 登录样例</button>' +
+      '<span class="muted" data-pl-edit-msg></span>' +
+      '</div>';
+
+    var m = U().openModal({
+      title: title,
+      width: 1000,
+      body: body,
+      footer: '<button class="btn" type="button" data-modal-close>取消</button>' +
+        '<button class="btn btn--primary" type="button" data-pl-save>保存并选用</button>'
+    });
+
+    var list = m.overlay.querySelector('#pl_ed_list');
+    var msg = m.overlay.querySelector('[data-pl-edit-msg]');
+    function say(text, isErr) {
+      if (msg) { msg.textContent = text || ''; msg.style.color = isErr ? 'var(--red)' : ''; }
+      if (text && isErr) toast(text, 'error');
+    }
+    function addRow(step) { list.insertAdjacentHTML('beforeend', plRowHtml(step)); }
+
+    var steps = (rec.steps || []).filter(function (s) { return s && s.action; });
+    if (steps.length) steps.forEach(addRow);
+    else addRow({ action: 'navigate' });
+
+    list.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-k="del"],[data-k="up"],[data-k="down"]') : null;
+      if (!btn) return;
+      var row = btn.closest('[data-row]');
+      if (!row) return;
+      var k = btn.getAttribute('data-k');
+      if (k === 'del') row.parentNode.removeChild(row);
+      else if (k === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      else if (k === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+    });
+
+    m.overlay.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-pl-edit]') : null;
+      if (!btn) return;
+      var what = btn.getAttribute('data-pl-edit');
+      if (what === 'add') addRow({ action: 'input' });
+      else if (what === 'captcha') addRow({ action: 'captcha', note: '4 位数字', locator: { strategy: 'css', value: '' } });
+      else if (what === 'sample') {
+        addRow({ action: 'navigate', value: '' });
+        addRow({ action: 'input', locator: { strategy: 'css', value: '#username' }, value: '{{username}}' });
+        addRow({ action: 'input', locator: { strategy: 'css', value: '#password' }, value: '{{password}}' });
+        addRow({ action: 'captcha', locator: { strategy: 'css', value: 'img.captcha' }, note: '4 位数字' });
+        addRow({ action: 'click', locator: { strategy: 'text', value: '登录' } });
+      }
+    });
+
+    var saveBtn = m.overlay.querySelector('[data-pl-save]');
+    if (saveBtn) saveBtn.addEventListener('click', function () {
+      var name = String(val(m.overlay, 'pl_ed_name') || '').trim() || '登录流程';
+      var startURL = String(val(m.overlay, 'pl_ed_start') || '').trim();
+      var list_ = readPlEditorRows(list);
+      if (!list_.length) { say('至少添加一步', true); return; }
+      for (var i = 0; i < list_.length; i++) {
+        var err = plStepError(list_[i], i + 1);
+        if (err) { say(err, true); return; }
+      }
+      saveBtn.disabled = true;
+      if (msg) { msg.textContent = '保存中…'; msg.style.color = ''; }
+      savePlFlow(mode, rec && rec.id, name, startURL, list_)
+        .then(function (id) {
+          m.close();
+          applyPlFlowSelection(root, pfx, id);
+          toast(isNew ? '流程已创建，并设为当前前置动作' : '流程已保存', 'success');
+        })
+        .catch(function (err) {
+          saveBtn.disabled = false;
+          say((err && err.message) || '保存失败', true);
+        });
+    });
+  }
+
+  /** 新建 / 更新录制，再整段写入步骤；返回录制 id */
+  function savePlFlow(mode, recId, name, startURL, steps) {
+    var ready;
+    if (mode === 'edit' && recId) {
+      ready = api('PATCH', '/api/recordings/' + encodeURIComponent(recId), { name: name, start_url: startURL });
+    } else {
+      ready = api('POST', '/api/recordings', {
+        name: name, start_url: startURL,
+        description: '采集任务前置动作（在采集任务里直接创建）',
+        tags: ['prelogin']
+      });
+    }
+    return ready.then(function (rec) {
+      var id = (rec && rec.id) || recId;
+      if (!id) throw new Error('创建流程失败：服务端没有返回 id');
+      return api('POST', '/api/recordings/' + encodeURIComponent(id) + '/steps/batch',
+        { mode: 'replace', steps: steps }).then(function () { return id; });
+    }).then(function (id) {
+      REC_CACHE = null;
+      delete PL_STEPS_CACHE[id];
+      return loadRecordings().then(function () { return id; });
+    });
+  }
+
+  /** 保存后把下拉切到刚保存的流程、打开开关，并刷新步骤预览 */
+  function applyPlFlowSelection(root, pfx, id) {
+    var sel = root.querySelector('#' + pfx + '_plrec');
+    if (sel) sel.innerHTML = recOptions(id);
+    refreshRecSelects(root);
+    if (sel) sel.value = id;
+    var on = root.querySelector('#' + pfx + '_plon');
+    if (on) on.checked = true;
+    delete PL_STEPS_CACHE[id];
+    renderPreloginSteps(root, pfx);
+  }
+
   function bindCommonActions(root, pfx, ctx) {
     ctx = ctx || {};
     // 前置动作录制：切换时刷新步骤预览（放在 early-return 之前，重复渲染也能补绑）
@@ -620,6 +874,19 @@
       plSel.setAttribute('data-pl-bound', '1');
       plSel.addEventListener('change', function () { renderPreloginSteps(root, pfx); });
       loadRecordings().then(function () { renderPreloginSteps(root, pfx); });
+    }
+    // 「新建流程 / 编辑」：直接在任务里搭 UI 前置动作，不必先去 UI 自动化录制
+    var plBlock = root.querySelector('[data-pl-block="' + pfx + '"]');
+    if (plBlock && plBlock.getAttribute('data-pl-bound') !== '1') {
+      plBlock.setAttribute('data-pl-bound', '1');
+      plBlock.addEventListener('click', function (e) {
+        var btn = e.target.closest ? e.target.closest('[data-pl-act]') : null;
+        if (!btn) return;
+        var act = btn.getAttribute('data-pl-act');
+        if (act === 'new') openPreloginEditor(root, pfx, 'new');
+        else if (act === 'edit') openPreloginEditor(root, pfx, 'edit');
+        else if (act === 'record') window.open(location.href.split('#')[0] + '#/recordings', '_blank');
+      });
     }
     var block = root.querySelector('[data-cm-block="' + pfx + '"]');
     if (!block || block.getAttribute('data-cm-bound') === '1') return;

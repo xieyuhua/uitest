@@ -155,6 +155,7 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | POST | `/api/recordings/batch-delete` | `{"ids":[…]}` → `{deleted, recordings, runs, message}` |
 | DELETE | `/api/recordings?all=1` | 清空全部（连带运行记录） |
 | POST | `/api/recordings/{id}/steps` | 追加一步（Step 除 id/recording_id/index）；同 `data_key` 的连续输入会被合并 |
+| POST | `/api/recordings/{id}/steps/batch` | `{"mode":"replace\|append","steps":[…Step]}` 整段写入（流程编辑器一次保存；校验动作白名单、`navigate` 必须有 URL、需要元素的动作必须有定位）→ Recording |
 | PATCH | `/api/recordings/{id}/steps/{sid}` | `annotation/value/data_key/expect/locator/target/wait_ms/optional/note/action` |
 | DELETE | `/api/recordings/{id}/steps/{sid}` | 删除一步 |
 | POST | `/api/recordings/{id}/reorder` | `{"step_ids":["stp_a","stp_b"]}` |
