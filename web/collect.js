@@ -218,6 +218,8 @@
     var th = cfg.throttle || {};
     var sink = cfg.sink || { driver: 'sqlite', table: 'harvest_records', mode: 'append', batch_size: 200 };
     var sess = cfg.session || { mode: 'browser' };
+    var tk = sess.token || {};
+    var lg = tk.login || {};
     var pl = cfg.prelogin || {};
     var cm = cfg.common || {};
     return '' +
@@ -249,16 +251,55 @@
       fld('去重键列（upsert 用）', inputHtml(pfx + '_key', sink.key_column || '', 'placeholder="如 id"')) +
       fld('批量提交行数', numHtml(pfx + '_batch', sink.batch_size || 200)) +
       '</div></div>' +
-      '<div class="ds-block"><div class="ds-block-title">登录态（浏览器会话）</div>' +
-      '<div class="field-hint" style="margin:0 0 10px">抓取时的 <b>Cookie 和请求头全部来自内置浏览器</b>：' +
-      '先用下面的「前置登录」把浏览器登好，之后就只有 URL / 请求体这些请求参数按接口配置。</div>' +
+      '<div class="ds-block" data-src-block="' + pfx + '"><div class="ds-block-title"><span>会话来源（登录态）</span>' +
+      '<span class="muted">三选一，所有接口共用同一份会话</span></div>' +
       '<div class="form-grid">' +
+      fld('会话怎么来', selectHtml(pfx + '_src',
+        [['ui', 'UI 自动化登录（前置登录后从浏览器导出 Cookie / 请求头）'],
+         ['http', '登录接口换 token（不用浏览器，顺带收 Cookie）'],
+         ['import', '仅导入（只用公共参数里的 Cookie / 参数）']],
+        sess.source || 'ui'),
+        '改完点保存；同一个任务的接口全部用这一份会话，不再每个接口各配一套') +
       fld('站点（留空 = 起始页 / 第一个接口）', inputHtml(pfx + '_host', sess.host || '', 'placeholder="https://example.com"'),
-        '从哪个站点导出 Cookie 与请求头；留空则自动用任务起始页或第一个接口的域名') +
+        'UI 来源：从哪个站点导出 Cookie 与请求头；登录接口来源：留空即可') +
       fld('浏览器请求头', selectHtml(pfx + '_hmode',
         [['all', '全部共享（默认，除请求参数外都用浏览器的）'], ['auth', '只共享鉴权头'], ['off', '不共享（只用录制值）']],
         sess.header_mode || 'all'),
         '录制时的 Authorization 早就过期了：默认连 User-Agent / X-* 一起换成浏览器的实时值') +
+      '</div>' +
+      '<div class="field-hint" data-src-only="ui" style="margin:6px 0 0">' +
+      '运行前先在浏览器里真点一遍登录（见下面的「前置登录」），Cookie / 请求头全部用浏览器里的最新值。' +
+      '</div>' +
+      '<div class="field-hint" data-src-only="import" style="margin:6px 0 0">' +
+      '完全不碰浏览器：只用「公共参数」里粘贴导入的 Cookie / 参数。凭证过期时重新导入一次即可。' +
+      '</div>' +
+      '<div data-src-only="http" style="margin-top:10px">' +
+      '<div class="form-grid">' +
+      fld('请求方法', selectHtml(pfx + '_lgmethod', [['POST', 'POST'], ['GET', 'GET'], ['PUT', 'PUT']], (lg.method || 'POST'))) +
+      fld('登录接口地址', inputHtml(pfx + '_lgurl', lg.url || '', 'placeholder="https://example.com/api/login"'),
+        '登录成功返回 JSON，token 取出来后写进公共参数，再注入请求头') +
+      '</div>' +
+      fld('登录请求头（一行一个 Name: Value）',
+        textareaHtml(pfx + '_lgheaders', headersToText(lg.headers), 3, 'placeholder="Content-Type: application/json"')) +
+      fld('请求体（可用 {{username}} / {{password}} / {{env:XXX}}）',
+        textareaHtml(pfx + '_lgbody', lg.body || '', 4, 'placeholder=\'{"username":"{{username}}","password":"{{password}}"}\''),
+        '变量在下面的「登录变量」里填；密码建议写 {{env:SITE_PASS}}，别把明文存在任务里') +
+      '<div class="form-grid">' +
+      fld('token 取值路径', inputHtml(pfx + '_lgtokenpath', lg.token_path || 'data', 'placeholder="data.token"'),
+        '响应 JSON 路径，如 data.token / data.access_token / token') +
+      fld('token 写进哪个公共参数', inputHtml(pfx + '_lgtokenparam', (tk.param || 'token'), 'placeholder="token"'),
+        '之后 URL / 请求体里可以写 {{token}}') +
+      fld('注入哪个请求头', inputHtml(pfx + '_lgheader', (tk.header || 'Authorization'), 'placeholder="Authorization"')) +
+      fld('前缀（填 - 表示不加）', inputHtml(pfx + '_lgprefix', (tk.prefix === undefined ? 'Bearer ' : tk.prefix), 'placeholder="Bearer "')) +
+      '</div>' +
+      fld('登录变量（一行一个 key=value，支持 {{env:XXX}}）',
+        textareaHtml(pfx + '_lgvars', varsToText(lg.vars), 3, 'placeholder=\'username=admin\npassword={{env:SITE_PASS}}\'')) +
+      '<label class="check-line"><input type="checkbox" id="' + pfx + '_lgcookies"' + (lg.with_cookies === false ? '' : ' checked') +
+      '> 把登录响应的 Set-Cookie 也带进采集请求</label>' +
+      '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      (pfx === 'tk' ? '<button class="btn btn--sm" type="button" data-act="test-login">测试登录</button>' : '') +
+      '<span class="muted" id="' + pfx + '_lgres"></span>' +
+      '</div>' +
       '</div>' +
       '</div>' +
       // 公共参数：所有接口共用；登录后的浏览器头 / 脚本会覆盖同名项
@@ -396,14 +437,41 @@
         key_column: val(root, pfx + '_key'),
         batch_size: numVal(root, pfx + '_batch', 200)
       },
-      session: {
-        mode: 'browser',
-        host: val(root, pfx + '_host'),
-        header_mode: val(root, pfx + '_hmode') || 'all'
-      },
+      session: readSessionForm(root, pfx),
       prelogin: readPreloginForm(root, pfx),
       common: readCommonForm(root, pfx)
     };
+  }
+
+  /** 会话来源：ui（浏览器）/ http（登录接口）/ import（仅导入） */
+  function readSessionForm(root, pfx) {
+    var src = val(root, pfx + '_src') || 'ui';
+    var out = {
+      mode: 'browser',
+      source: src,
+      host: val(root, pfx + '_host').trim(),
+      header_mode: val(root, pfx + '_hmode') || 'all'
+    };
+    if (src !== 'http') return out;
+    var url = val(root, pfx + '_lgurl').trim();
+    if (!url) return out;
+    var cookiesEl = root.querySelector('#' + pfx + '_lgcookies');
+    out.token = {
+      source: 'login',
+      param: val(root, pfx + '_lgtokenparam').trim() || 'token',
+      header: val(root, pfx + '_lgheader').trim() || 'Authorization',
+      prefix: val(root, pfx + '_lgprefix'),
+      login: {
+        method: val(root, pfx + '_lgmethod') || 'POST',
+        url: url,
+        headers: textToHeaders(val(root, pfx + '_lgheaders')),
+        body: val(root, pfx + '_lgbody'),
+        token_path: val(root, pfx + '_lgtokenpath').trim() || 'data',
+        with_cookies: !!(cookiesEl && cookiesEl.checked),
+        vars: parseKV(val(root, pfx + '_lgvars'), '=')
+      }
+    };
+    return out;
   }
 
   /** 公共参数：全空 = 没配（后端按 null 清掉） */
@@ -517,6 +585,78 @@
       if (act === 'suggest') { runCommonSuggest(root, pfx, ctx, say); return; }
       if (act === 'refresh') { runCommonRefresh(ctx, say); return; }
     });
+    // 会话来源切换：只显示当前来源要填的东西
+    var srcBlock = block.getAttribute('data-src-block') ? block : root.querySelector('[data-src-block="' + pfx + '"]');
+    var srcSel = srcBlock ? srcBlock.querySelector('#' + pfx + '_src') : null;
+    if (srcSel) {
+      var syncSrc = function () {
+        var v = srcSel.value || 'ui';
+        Array.prototype.forEach.call(srcBlock.querySelectorAll('[data-src-only]'), function (el) {
+          el.hidden = el.getAttribute('data-src-only') !== v;
+        });
+      };
+      srcSel.addEventListener('change', syncSrc);
+      syncSrc();
+    }
+    // 「测试登录」：只测登录接口，不保存、不落库
+    var tbtn = srcBlock ? srcBlock.querySelector('[data-act="test-login"]') : null;
+    if (tbtn) tbtn.addEventListener('click', function () { runTestLogin(root, pfx, ctx); });
+  }
+
+  /** 测试登录：按表单里当前的（未保存）登录配置真调一次，展示脱敏后的全过程 */
+  function runTestLogin(root, pfx, ctx) {
+    var out = root.querySelector('#' + pfx + '_lgres');
+    if (!ctx.taskId) { toast('先保存任务，再测试登录', 'info'); return; }
+    var sess = readSessionForm(root, pfx);
+    var tk = sess.token || {};
+    var lg = tk.login || {};
+    if (!lg.url) { toast('先填登录接口地址', 'error'); return; }
+    if (out) { out.textContent = '正在调登录接口…'; out.style.color = ''; }
+    api('POST', '/api/collect/tasks/' + encodeURIComponent(ctx.taskId) + '/login/test',
+      { login: lg, param: tk.param, header: tk.header, prefix: tk.prefix })
+      .then(function (res) {
+        var tr = res.trace || {};
+        var bits = [];
+        bits.push((res.ok ? '✔ ' : '✘ ') + (tr.method || 'POST') + ' ' + (tr.status || '—') + ' · ' + (res.elapsed_ms || 0) + ' ms');
+        if (tr.token_preview) bits.push('token ' + tr.token_preview + '（' + (tr.token_length || 0) + ' 字符）');
+        if ((tr.cookies || []).length) bits.push('Set-Cookie：' + tr.cookies.join('、'));
+        if ((res.applied || []).length) bits.push('生效 ' + res.applied.join('、'));
+        if (res.error) bits.push(res.error);
+        if (out) { out.textContent = bits.join(' · '); out.style.color = res.ok ? '' : 'var(--red)'; }
+        U().openModal({
+          title: '测试登录结果（敏感值已脱敏）', width: 780,
+          body: loginTraceHtml(tr, res),
+          footer: '<button class="btn" data-modal-close>关闭</button>'
+        });
+      }).catch(function () {
+        if (out) { out.textContent = '请求失败，看服务端日志'; out.style.color = 'var(--red)'; }
+      });
+  }
+
+  /** 登录接口调用的详细过程（脱敏）：请求头 / 请求体 / 响应头 / 响应体 / token 解析 */
+  function loginTraceHtml(tr, res) {
+    tr = tr || {};
+    var ok = res ? !!res.ok : !tr.error;
+    var html = '<div class="alert alert--' + (ok ? 'info' : 'warn') + '" style="margin:0 0 10px">' +
+      esc((tr.method || '') + ' ' + (tr.url || '')) + '<br>状态 ' + esc(tr.status || '—') +
+      ' · ' + esc(tr.duration_ms || 0) + ' ms' + (tr.cached ? ' · 命中缓存（没真的再登一次）' : '') + '</div>';
+    if (tr.headers) html += '<div class="pv-section-title">请求头（脱敏）</div>' + pvKVHtml(tr.headers);
+    if (tr.body) html += '<div class="pv-section-title">请求体（脱敏）</div>' + pvPre(tr.body);
+    if (tr.response_headers) html += pvDetailsHtml('响应头（脱敏）', pvKVHtml(tr.response_headers));
+    if (tr.body_preview) html += '<div class="pv-section-title">响应体（前 2000 字节）</div>' + pvPre(tr.body_preview);
+    var rows = [];
+    rows.push(['token 取值路径', tr.token_path || '—']);
+    rows.push(['token（脱敏）', (tr.token_preview || '—') + (tr.token_length ? '（' + tr.token_length + ' 字符）' : '')]);
+    rows.push(['写进公共参数', tr.param || '—']);
+    rows.push(['注入请求头', (tr.header || '—') + (tr.prefix ? ' ' + tr.prefix : '')]);
+    rows.push(['Set-Cookie', (tr.cookies || []).join('、') || '无']);
+    if (res && (res.applied || []).length) rows.push(['最终生效', res.applied.join('、')]);
+    if (tr.note) rows.push(['说明', tr.note]);
+    if (tr.error) rows.push(['错误', tr.error]);
+    html += '<div class="pv-section-title">解析结果</div><div class="table-wrap"><table class="pv-kv"><tbody>' +
+      rows.map(function (r) { return '<tr><th>' + esc(r[0]) + '</th><td>' + esc(r[1]) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>';
+    return html;
   }
 
   /** 粘贴导入弹窗：Cookie / Header / 参数 / cURL 任填一项 */
@@ -587,7 +727,11 @@
         if (!res.ok) { say(res.error || '刷新失败', true); return; }
         var rf = res.refresh || {};
         var lines = [];
+        if (rf.source_text) lines.push('会话来源：' + rf.source_text);
         if (rf.session) lines.push(rf.session);
+        if (rf.login && rf.login.ok !== false && rf.login.token_preview) {
+          lines.push('登录接口 token ' + rf.login.token_preview);
+        }
         if (rf.applied && rf.applied.length) lines.push('本次更新：' + rf.applied.join('、'));
         if (rf.params && Object.keys(rf.params).length) {
           lines.push('参数：' + Object.keys(rf.params).map(function (k) { return k + '=' + rf.params[k]; }).join('，'));
@@ -605,7 +749,12 @@
   /** 「登录后刷新」结果弹窗：参数 / Cookie / 请求头 / 绑定都是脱敏值 */
   function refreshResultHtml(rf) {
     rf = rf || {};
-    var html = '<div class="alert alert--info" style="margin:0 0 10px">' + esc(rf.session || '登录态摘要不可用') + '</div>';
+    var html = '<div class="alert alert--info" style="margin:0 0 10px">' +
+      (rf.source_text ? '<b>会话来源：' + esc(rf.source_text) + '</b><br>' : '') +
+      esc(rf.session || '登录态摘要不可用') + '</div>';
+    if (rf.login && (rf.login.url || rf.login.error)) {
+      html += pvDetailsHtml('登录接口调用过程（脱敏）', loginTraceHtml(rf.login, { ok: !rf.login.error }));
+    }
     if ((rf.applied || []).length) {
       html += '<div class="pv-section-title">本次更新</div><div class="chips">' +
         rf.applied.map(function (x) { return '<span class="chip">' + esc(x) + '</span>'; }).join('') + '</div>';

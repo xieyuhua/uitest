@@ -362,6 +362,10 @@ func (s *Server) createHarvestTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Session != nil {
 		task.Session = *req.Session
+		if msg := sessionConfigErr(task.Session); msg != "" {
+			writeErr(w, http.StatusBadRequest, msg)
+			return
+		}
 	}
 	task.Prelogin = req.Prelogin
 	task.Notify = req.Notify
@@ -382,6 +386,17 @@ func (s *Server) createHarvestTask(w http.ResponseWriter, r *http.Request) {
 		out = t
 	}
 	writeJSON(w, http.StatusOK, harvestTaskView(out, s.Collect.Harvester.Running(out.ID), true))
+}
+
+// sessionConfigErr 会话来源的保存前校验（运行期还会再校验一次，这里先拦住明显配错的）。
+func sessionConfigErr(s model.HarvestSession) string {
+	if s.EffectiveSource() != model.SessionSourceHTTP {
+		return ""
+	}
+	if s.Token == nil || s.Token.Login == nil || strings.TrimSpace(s.Token.Login.URL) == "" {
+		return "会话来源选了「登录接口」，但没填登录接口地址"
+	}
+	return ""
 }
 
 // endpointsFromCapture 用录制结果生成接口定义。
@@ -576,6 +591,10 @@ func (s *Server) patchHarvestTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Session != nil {
 		t.Session = *req.Session
+		if msg := sessionConfigErr(t.Session); msg != "" {
+			writeErr(w, http.StatusBadRequest, msg)
+			return
+		}
 	}
 	if req.Prelogin != nil {
 		pl := *req.Prelogin
@@ -766,6 +785,61 @@ func (s *Server) runPrelogin(w http.ResponseWriter, r *http.Request) {
 		out["common_refresh"] = prev
 	} else {
 		out["common_refresh_error"] = perr.Error()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// testLoginReq 「测试登录」请求：带 login 就用传来的（未保存的）配置，否则用任务里存的。
+type testLoginReq struct {
+	Login  *model.HarvestLogin `json:"login"`
+	Param  string              `json:"param"`
+	Header string              `json:"header"`
+	Prefix string              `json:"prefix"`
+}
+
+// testLogin POST /api/collect/tasks/{id}/login/test —— 只跑一次登录接口，看 token / Cookie 拿没拿到
+func (s *Server) testLogin(w http.ResponseWriter, r *http.Request) {
+	t, err := s.DB.GetHarvestTask(r.PathValue("id"))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var req testLoginReq
+	_ = readJSON(r, &req)
+	lg := req.Login
+	if lg == nil || strings.TrimSpace(lg.URL) == "" {
+		if t.Session.Token == nil || t.Session.Token.Login == nil || strings.TrimSpace(t.Session.Token.Login.URL) == "" {
+			writeErr(w, http.StatusBadRequest, "没有登录接口配置：先在「会话来源 → 登录接口」里填地址 / 请求体 / token 取值路径")
+			return
+		}
+		cp := *t.Session.Token.Login
+		lg = &cp
+	}
+	tk := model.HarvestToken{Source: "login", Login: lg, Param: req.Param, Header: req.Header, Prefix: req.Prefix}
+	if t.Session.Token != nil {
+		base := t.Session.Token.Effective()
+		if strings.TrimSpace(tk.Param) == "" {
+			tk.Param = base.Param
+		}
+		if strings.TrimSpace(tk.Header) == "" {
+			tk.Header = base.Header
+		}
+		if strings.TrimSpace(tk.Prefix) == "" {
+			tk.Prefix = base.Prefix
+		}
+	}
+	ctx, cancel := timeoutCtx(r, 90*time.Second)
+	defer cancel()
+	start := time.Now()
+	trace, applied, lerr := s.Collect.Harvester.TestLogin(ctx, &t, tk)
+	out := map[string]any{
+		"ok":         lerr == nil,
+		"elapsed_ms": time.Since(start).Milliseconds(),
+		"trace":      trace,
+		"applied":    applied,
+	}
+	if lerr != nil {
+		out["error"] = lerr.Error()
 	}
 	writeJSON(w, http.StatusOK, out)
 }

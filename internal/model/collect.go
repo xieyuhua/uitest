@@ -450,8 +450,48 @@ type HarvestSession struct {
 	//   auth       只覆盖鉴权类（Authorization / *token* / *auth* / x-*）
 	//   off        不覆盖，只用接口配置里的值
 	HeaderMode string `json:"header_mode,omitempty"`
-	// Token 兼容保留（界面上已不提供配置入口）
+	// Source 会话来源（所有接口共用同一份会话）：
+	//   ui      UI 自动化登录（前置登录），Cookie / 请求头从内置浏览器导出（默认）
+	//   http    调登录接口换 token（可顺带把 Set-Cookie 带进来），不需要浏览器
+	//   import  只用「公共参数」里手工导入的 Cookie / 参数，完全不碰浏览器
+	Source string `json:"source,omitempty"`
+	// Token 登录接口 / 手填 token 的配置（source=http 或 manual 时生效）
 	Token *HarvestToken `json:"token,omitempty"`
+}
+
+// 会话来源常量（给接口层与前端对齐用）。
+const (
+	SessionSourceUI     = "ui"
+	SessionSourceHTTP   = "http"
+	SessionSourceImport = "import"
+)
+
+// EffectiveSource 会话来源（默认 ui；老任务里配了登录接口的自动按 http 处理）。
+func (s HarvestSession) EffectiveSource() string {
+	switch strings.ToLower(strings.TrimSpace(s.Source)) {
+	case "ui", "browser", "prelogin":
+		return SessionSourceUI
+	case "http", "login", "api":
+		return SessionSourceHTTP
+	case "import", "manual", "none", "cookie":
+		return SessionSourceImport
+	}
+	if s.Token != nil && s.Token.Effective().Source == "login" {
+		return SessionSourceHTTP
+	}
+	return SessionSourceUI
+}
+
+// SourceText 人可读的会话来源。
+func (s HarvestSession) SourceText() string {
+	switch s.EffectiveSource() {
+	case SessionSourceHTTP:
+		return "登录接口换 token"
+	case SessionSourceImport:
+		return "仅导入（不用浏览器）"
+	default:
+		return "UI 自动化登录（浏览器会话）"
+	}
 }
 
 // EffectiveHeaderMode 浏览器请求头覆盖策略（默认 all：除请求参数外与浏览器共享）。
@@ -483,6 +523,9 @@ type HarvestToken struct {
 	Prefix string `json:"prefix,omitempty"`
 	// CacheSeconds token 缓存多久（秒）
 	CacheSeconds int `json:"cache_seconds,omitempty"`
+	// Param token 写进哪个公共参数名（默认 token）：写进去之后 URL / 请求体 / 请求头里
+	// 都能用 {{token}}，参数绑定也会用它覆盖旧值
+	Param string `json:"param,omitempty"`
 	// Login source=login：直接调登录接口换 token（不用开浏览器）
 	Login *HarvestLogin `json:"login,omitempty"`
 }
@@ -496,6 +539,9 @@ type HarvestLogin struct {
 	TokenPath string            `json:"token_path,omitempty"`
 	// WithCookies 登录返回的 Set-Cookie 也带进采集请求（默认 true）
 	WithCookies *bool `json:"with_cookies,omitempty"`
+	// Vars 登录接口要用的变量（如 username / password），在 URL / Headers / Body 里写 {{name}}；
+	// 值支持 {{env:XXX}}，把账号密码放环境变量里更安全
+	Vars map[string]string `json:"vars,omitempty"`
 }
 
 // Effective 登录接口的默认值（Method=POST，TokenPath=data）。
@@ -541,6 +587,9 @@ func (t HarvestToken) Effective() HarvestToken {
 	}
 	if out.Prefix == "-" {
 		out.Prefix = ""
+	}
+	if strings.TrimSpace(out.Param) == "" {
+		out.Param = "token"
 	}
 	if out.Login != nil {
 		lg := out.Login.Effective()
@@ -791,6 +840,12 @@ func (t HarvestTask) Clone() HarvestTask {
 				lg.Headers = make(map[string]string, len(tk.Login.Headers))
 				for k, v := range tk.Login.Headers {
 					lg.Headers[k] = v
+				}
+			}
+			if lg.Vars != nil {
+				lg.Vars = make(map[string]string, len(tk.Login.Vars))
+				for k, v := range tk.Login.Vars {
+					lg.Vars[k] = v
 				}
 			}
 			tk.Login = &lg

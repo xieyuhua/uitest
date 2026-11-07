@@ -314,6 +314,12 @@ type SessionRefreshPreview struct {
 	Applied []string `json:"applied,omitempty"`
 	// Notes 给人看的提示（没启用刷新、没找到 token 等）
 	Notes []string `json:"notes,omitempty"`
+	// Source 会话来源：ui / http / import
+	Source string `json:"source,omitempty"`
+	// SourceText 来源的中文说明
+	SourceText string `json:"source_text,omitempty"`
+	// Login 来源是登录接口时，这次登录调用的过程（脱敏）
+	Login *LoginTrace `json:"login,omitempty"`
 }
 
 // RefreshSessionPreview 按当前浏览器登录态解析一次会话，并执行「登录后刷新公共参数」，
@@ -338,6 +344,9 @@ func (h *Harvester) RefreshSessionPreview(ctx context.Context, task *model.Harve
 		return out, err
 	}
 	out.Session = sessionSummary(task.Session, sess)
+	out.Source = sess.source
+	out.SourceText = task.Session.SourceText()
+	out.Login = sess.loginTrace
 	out.Applied = h.applySessionRefresh(ctx, "", task, &sess)
 	refreshing := task.Common != nil && task.Common.Refresh.Active()
 	if !refreshing {
@@ -395,4 +404,80 @@ func (h *Harvester) RunPreloginNow(ctx context.Context, task *model.HarvestTask)
 		return fmt.Errorf("这个任务没有配置前置登录（先选一个「登录流程录制」并打开开关）")
 	}
 	return h.runPreloginQuiet(ctx, task)
+}
+
+/* -------------------------------------------------------- 会话过程追踪 */
+
+// SessionTrace 这次抓取用的会话是怎么拼出来的（敏感值一律脱敏）。
+// 试抓 / 自检 / 「登录后刷新」都把它展示出来，方便核对：
+// Cookie 从哪来、token 换成新的没有、公共参数被刷新成了什么、参数绑定怎么覆盖请求头。
+type SessionTrace struct {
+	Source       string                      `json:"source"`
+	SourceText   string                      `json:"source_text"`
+	Host         string                      `json:"host,omitempty"`
+	HeaderMode   string                      `json:"header_mode"`
+	CookieCount  int                         `json:"cookie_count"`
+	Cookies      []string                    `json:"cookies,omitempty"`
+	TokenHeader  string                      `json:"token_header,omitempty"`
+	TokenPrefix  string                      `json:"token_prefix,omitempty"`
+	TokenPreview string                      `json:"token_preview,omitempty"`
+	TokenLength  int                         `json:"token_length,omitempty"`
+	Headers      map[string]string           `json:"headers,omitempty"`
+	Params       map[string]string           `json:"params,omitempty"`
+	Bindings     []model.HarvestParamBinding `json:"bindings,omitempty"`
+	Refresh      []string                    `json:"refresh,omitempty"`
+	ScriptRan    bool                        `json:"script_ran,omitempty"`
+	Notes        []string                    `json:"notes,omitempty"`
+}
+
+// buildSessionTrace 把已解析好的会话整理成可展示的追踪信息。
+func buildSessionTrace(cfg model.HarvestSession, sess resolvedSession, refreshed []string, scriptRan bool) *SessionTrace {
+	out := &SessionTrace{
+		Source:      sess.source,
+		SourceText:  cfg.SourceText(),
+		Host:        strings.TrimSpace(cfg.Host),
+		HeaderMode:  orDefaultStr(sess.headerMode, "all"),
+		CookieCount: sess.cookieCount,
+		Cookies:     cookieNameList(sess),
+		Refresh:     append([]string(nil), refreshed...),
+		ScriptRan:   scriptRan,
+	}
+	if sess.token != "" {
+		out.TokenHeader = orDefaultStr(sess.tokenHeader, "Authorization")
+		out.TokenPrefix = sess.tokenPrefix
+		out.TokenPreview = maskSecret(sess.token)
+		out.TokenLength = len(sess.token)
+	}
+	if len(sess.headers) > 0 {
+		out.Headers = make(map[string]string, len(sess.headers))
+		for k, v := range sess.headers {
+			out.Headers[k] = maskHeaderValue(k, v)
+		}
+	}
+	if len(sess.params) > 0 {
+		out.Params = make(map[string]string, len(sess.params))
+		for k, v := range sess.params {
+			out.Params[k] = maskIfSensitive(k, v)
+		}
+	}
+	if len(sess.bindings) > 0 {
+		out.Bindings = append([]model.HarvestParamBinding(nil), sess.bindings...)
+	}
+	switch sess.source {
+	case model.SessionSourceUI:
+		if len(sess.headers) == 0 {
+			out.Notes = append(out.Notes,
+				"没从浏览器嗅到登录态请求头：接口里录制下来的 Authorization 可能还是旧值，把「站点」改成登录后就会请求接口的页面（列表页 / 首页）")
+		}
+	case model.SessionSourceHTTP:
+		if sess.loginTrace != nil && sess.loginTrace.Error != "" {
+			out.Notes = append(out.Notes, "登录接口失败："+sess.loginTrace.Error)
+		} else {
+			out.Notes = append(out.Notes, "token / Cookie 来自登录接口，不依赖浏览器；登录接口不会自动续期，凭证过期时每次运行会重新登一次")
+		}
+	case model.SessionSourceImport:
+		out.Notes = append(out.Notes,
+			"仅使用公共参数里导入的 Cookie / 参数，不会打开浏览器；凭证过期后需要重新「粘贴导入」或改用登录接口")
+	}
+	return out
 }

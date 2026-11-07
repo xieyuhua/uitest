@@ -118,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collect/tasks/{id}/test-notify", s.testHarvestNotify)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/token", s.taskToken)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/prelogin", s.runPrelogin)
+	mux.HandleFunc("POST /api/collect/tasks/{id}/login/test", s.testLogin)
 	// 公共参数：录制汇总 / 粘贴导入 / 登录后刷新
 	mux.HandleFunc("POST /api/collect/tasks/{id}/common/suggest", s.suggestTaskCommon)
 	mux.HandleFunc("POST /api/collect/tasks/{id}/common/import", s.importTaskCommon)

@@ -197,8 +197,15 @@ func (h *Harvester) execute(ctx context.Context, runID string) {
 	h.store.MutateHarvestRun(runID, func(r *model.HarvestRun) { r.Sink = sinks.DescribeAll() })
 	h.logf(runID, "info", "写入目标：%s", sinks.DescribeAll())
 
-	// 前置登录：先跑一遍 UI 自动化（登录），把内置浏览器会话刷新好再抓
-	if task.Prelogin != nil && task.Prelogin.Active() {
+	h.logf(runID, "info", "会话来源：%s", task.Session.SourceText())
+
+	// 前置登录：先跑一遍 UI 自动化（登录），把内置浏览器会话刷新好再抓。
+	// 会话来源不是 ui（登录接口 / 仅导入）时不依赖浏览器，跳过并说明原因。
+	if task.Session.EffectiveSource() != model.SessionSourceUI {
+		if task.Prelogin != nil && task.Prelogin.Active() {
+			h.logf(runID, "info", "会话来源是「%s」，本次跳过前置登录（UI 自动化）", task.Session.SourceText())
+		}
+	} else if task.Prelogin != nil && task.Prelogin.Active() {
 		pl := task.Prelogin.Effective()
 		if pl.Mode != "on-fail" {
 			plv := h.preloginDataset(pl)
@@ -717,6 +724,10 @@ type resolvedSession struct {
 	token       string
 	tokenHeader string
 	tokenPrefix string
+	// source 会话来源（ui / http / import），决定 resolveSession 走哪条路
+	source string
+	// 登录接口的调用过程（脱敏后给试抓 / 自检 / 测试登录展示）
+	loginTrace *LoginTrace
 }
 
 func (h *Harvester) newClient(th model.HarvestThrottle, sess resolvedSession) *http.Client {
@@ -808,6 +819,7 @@ func sessionScaffold(task *model.HarvestTask) resolvedSession {
 	sess.userAgent = strings.TrimSpace(task.Session.UserAgent)
 	sess.referer = strings.TrimSpace(task.Session.Referer)
 	sess.headerMode = task.Session.EffectiveHeaderMode()
+	sess.source = task.Session.EffectiveSource()
 	if sess.referer == "" {
 		sess.referer = strings.TrimSpace(task.StartURL)
 	}
@@ -825,15 +837,27 @@ func sessionScaffold(task *model.HarvestTask) resolvedSession {
 	return sess
 }
 
-// resolveSession 准备登录态：统一从内置浏览器取（前置登录之后浏览器里就是最新登录态）。
+// resolveSession 准备登录态。三种来源，所有接口共用这一份会话：
 //
-// 抓取用的 Cookie + 请求头全部来自浏览器；接口里只保留 URL / 请求体这些"请求参数"。
+//	ui      前置登录（UI 自动化）把内置浏览器登好，Cookie / 请求头从浏览器导出（默认）
+//	http    先调登录接口换 token（顺带收 Set-Cookie），不需要浏览器
+//	import  只用「公共参数」里手工导入的 Cookie / 参数，完全不碰浏览器
 func (h *Harvester) resolveSession(ctx context.Context, task *model.HarvestTask) (resolvedSession, error) {
 	sess := sessionScaffold(task)
 
-	// token 配置属于老任务兼容（界面已不提供入口）
+	// 1) 先取 token：http 模式的登录接口调用就发生在这里（同时会把 Set-Cookie 收进会话）
 	if err := h.resolveToken(ctx, task, &sess); err != nil {
 		return sess, err
+	}
+
+	// 2) 仅导入：不碰浏览器，公共参数里有什么用什么
+	if sess.source == model.SessionSourceImport {
+		sess.cookieCount = countCookies(sess)
+		if sess.cookieCount == 0 && sess.token == "" && len(sess.params) == 0 && len(sess.commonHeaders) == 0 {
+			return sess, fmt.Errorf("会话来源是「仅导入」，但公共参数里没有 Cookie / 参数 / 请求头：" +
+				"先点「公共参数 → 粘贴导入」贴上浏览器里的 Cookie，或把来源改成 UI 自动化 / 登录接口")
+		}
+		return sess, nil
 	}
 
 	target := sessionTarget(task)
@@ -847,34 +871,74 @@ func (h *Harvester) resolveSession(ctx context.Context, task *model.HarvestTask)
 		}
 	}
 
+	// 3) 登录接口模式：token / Cookie 已经在上面拿到了；浏览器里要是有会话也顺带补一份
+	if sess.source == model.SessionSourceHTTP {
+		if list, err := h.browserCookies(ctx, target, urls); err == nil && len(list) > 0 {
+			for _, ep := range task.Endpoints {
+				if o := originOf(ep.URL); o != "" {
+					addCookies(sess.cookies, o, list)
+				}
+			}
+			if hd := h.sniffSessionHeaders(ctx, task, target, urls); len(hd) > 0 {
+				sess.headers = hd
+			}
+		}
+		sess.cookieCount = countCookies(sess)
+		if sess.token == "" && sess.cookieCount == 0 {
+			return sess, fmt.Errorf("会话来源是「登录接口」，但登录没拿到 token 也没拿到 Cookie：" +
+				"检查登录接口地址 / 请求体 / token 取值路径（token_path），或点「测试登录」看看响应")
+		}
+		return sess, nil
+	}
+
+	// 4) UI 自动化：Cookie 与请求头全部来自内置浏览器
 	list, err := h.browserCookies(ctx, target, urls)
 	if err != nil {
 		// 导入的公共 Cookie 也能当登录态用：没有浏览器会话时不直接失败
-		if len(sess.commonCookies) > 0 {
-			sess.cookieCount = len(sess.commonCookies)
+		if len(sess.commonCookies) > 0 || sess.token != "" {
+			sess.cookieCount = countCookies(sess)
 			return sess, nil
 		}
 		return sess, err
 	}
 	if len(list) == 0 {
-		if len(sess.commonCookies) > 0 {
-			sess.cookieCount = len(sess.commonCookies)
+		if len(sess.commonCookies) > 0 || sess.token != "" {
+			sess.cookieCount = countCookies(sess)
 			return sess, nil
 		}
 		return sess, fmt.Errorf("内置浏览器里没有 %s 的登录 Cookie（按 %s 取）：配一个「前置登录（UI 自动化）」把浏览器登进去，或先在内置浏览器里手动登录一次；"+
-			"也可以在「公共参数 → 导入会话参数」里直接粘贴 Cookie", target, strings.Join(urls, "、"))
+			"也可以在「公共参数 → 粘贴导入」里直接贴 Cookie 并把会话来源改成「仅导入」，或改用「登录接口」换 token", target, strings.Join(urls, "、"))
 	}
 	for _, ep := range task.Endpoints {
 		if o := originOf(ep.URL); o != "" {
 			addCookies(sess.cookies, o, list)
 		}
 	}
-	sess.cookieCount = len(list) + len(sess.commonCookies)
+	sess.cookieCount = countCookies(sess)
 	// 再把浏览器里"真实在用的"请求头抄一份：录制时存下的 Authorization / X-Token 已经过期了
 	if hd := h.sniffSessionHeaders(ctx, task, target, urls); len(hd) > 0 {
 		sess.headers = hd
 	}
 	return sess, nil
+}
+
+// countCookies 会话里不同名字的 Cookie 个数（浏览器导出 + 公共导入，同名算一个）。
+func countCookies(sess resolvedSession) int {
+	seen := map[string]bool{}
+	for _, list := range sess.cookies {
+		for _, c := range list {
+			if c == nil || strings.TrimSpace(c.Name) == "" {
+				continue
+			}
+			seen[c.Name] = true
+		}
+	}
+	for name := range sess.commonCookies {
+		if strings.TrimSpace(name) != "" {
+			seen[name] = true
+		}
+	}
+	return len(seen)
 }
 
 // runPrelogin 跑一次前置登录（UI 自动化录制），跑完把这个站点的会话缓存作废。
@@ -1281,15 +1345,78 @@ func (h *Harvester) browserToken(ctx context.Context, origin, storage, key strin
 	return v, nil
 }
 
+// LoginTrace 一次「调登录接口换 token」的完整过程（敏感值已脱敏）。
+// 「测试登录」、试抓、自检都直接展示这段，方便核对到底换了什么。
+type LoginTrace struct {
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Body            string            `json:"body,omitempty"`
+	Status          int               `json:"status,omitempty"`
+	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
+	BodyPreview     string            `json:"body_preview,omitempty"`
+	TokenPath       string            `json:"token_path,omitempty"`
+	TokenPreview    string            `json:"token_preview,omitempty"`
+	TokenLength     int               `json:"token_length,omitempty"`
+	Param           string            `json:"param,omitempty"`
+	Header          string            `json:"header,omitempty"`
+	Prefix          string            `json:"prefix,omitempty"`
+	Cookies         []string          `json:"cookies,omitempty"`
+	DurationMS      int64             `json:"duration_ms,omitempty"`
+	Cached          bool              `json:"cached,omitempty"`
+	Note            string            `json:"note,omitempty"`
+	Error           string            `json:"error,omitempty"`
+}
+
 // loginToken 调登录接口换 token（不用开浏览器）：
-// 发一次登录请求 → 从响应 JSON 的 TokenPath 取 token → 顺便把 Set-Cookie 带进采集会话。
+// 发一次登录请求 → 从响应 JSON 的 TokenPath 取 token → 顺便把 Set-Cookie 带进采集会话 →
+// 把 token 写进公共参数（默认 token），之后所有接口的 {{token}} 与鉴权头都用它。
 func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk model.HarvestToken, sess *resolvedSession) error {
 	if tk.Login == nil || strings.TrimSpace(tk.Login.URL) == "" {
-		return fmt.Errorf("Token 来源是「登录接口」，但没填登录接口地址")
+		return fmt.Errorf("会话来源是「登录接口」，但没填登录接口地址")
 	}
 	lg := tk.Login.Effective()
-	loginURL := strings.TrimSpace(expand(lg.URL, sessionVars(*sess)))
-	bodyText := expand(lg.Body, sessionVars(*sess))
+	param := strings.TrimSpace(tk.Param)
+	if param == "" {
+		param = "token"
+	}
+	headerName := orDefaultStr(strings.TrimSpace(tk.Header), "Authorization")
+	if strings.TrimSpace(sess.tokenHeader) == "" {
+		sess.tokenHeader = headerName
+		sess.tokenPrefix = tk.Prefix
+	}
+	if sess.params == nil {
+		sess.params = map[string]string{}
+	}
+
+	// 变量：内置变量 + 公共参数 + 登录专用变量（值支持 {{env:XXX}}）
+	baseVars := sessionVars(*sess)
+	vars := make(map[string]string, len(baseVars)+len(lg.Vars))
+	for k, v := range baseVars {
+		vars[k] = v
+	}
+	for k, v := range lg.Vars {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		vars[key] = strings.TrimSpace(expand(v, baseVars))
+	}
+	loginURL := strings.TrimSpace(expand(lg.URL, vars))
+	bodyText := expand(lg.Body, vars)
+
+	tr := &LoginTrace{
+		Method:    strings.ToUpper(strings.TrimSpace(orDefaultStr(lg.Method, http.MethodPost))),
+		URL:       loginURL,
+		Body:      maskRequestBody(bodyText),
+		TokenPath: lg.TokenPath,
+		Param:     param,
+		Header:    headerName,
+		Prefix:    tk.Prefix,
+	}
+	sess.loginTrace = tr
+	started := time.Now()
+	defer func() { tr.DurationMS = time.Since(started).Milliseconds() }()
 
 	// 同一套登录配置 + 同样的请求体，在缓存有效期内复用
 	cacheKey := "login|" + loginURL + "|" + bodyText
@@ -1300,26 +1427,27 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 			v := c.value
 			h.cookieMu.Unlock()
 			sess.token = v
+			sess.params[param] = v
+			tr.Cached = true
+			tr.TokenPreview = maskSecret(v)
+			tr.TokenLength = len(v)
+			tr.Note = "命中缓存，没有真的再调一次登录接口（cache_seconds 内复用）"
 			return nil
 		}
 		h.cookieMu.Unlock()
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(lg.Method))
-	if method == "" {
-		method = http.MethodPost
-	}
 	var reader io.Reader
 	if bodyText != "" {
 		reader = strings.NewReader(bodyText)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, loginURL, reader)
+	req, err := http.NewRequestWithContext(ctx, tr.Method, loginURL, reader)
 	if err != nil {
+		tr.Error = "登录请求构造失败：" + err.Error()
 		return fmt.Errorf("登录请求构造失败：%w", err)
 	}
-	sessVars := sessionVars(*sess)
 	for k, v := range lg.Headers {
-		req.Header.Set(k, expand(v, sessVars))
+		req.Header.Set(k, expand(v, vars))
 	}
 	if req.Header.Get("Content-Type") == "" && bodyText != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -1330,6 +1458,7 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 	if sess.userAgent != "" {
 		req.Header.Set("User-Agent", sess.userAgent)
 	}
+	tr.Headers = maskHeaders(req.Header)
 
 	// 单独一个带 jar 的客户端：登录返回的 Set-Cookie 要留着给采集请求用
 	jar, _ := cookiejar.New(nil)
@@ -1338,22 +1467,32 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 
 	resp, err := client.Do(req)
 	if err != nil {
+		tr.Error = "登录接口请求失败：" + err.Error()
 		return fmt.Errorf("登录接口请求失败（%s）：%w", loginURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	tr.Status = resp.StatusCode
+	tr.ResponseHeaders = maskHeaders(resp.Header)
+	tr.BodyPreview = maskBodyPreview(raw)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		tr.Error = fmt.Sprintf("登录接口返回 %d", resp.StatusCode)
 		return fmt.Errorf("登录接口返回 %d：%s", resp.StatusCode, previewText(string(raw), 300))
 	}
 	root, perr := ParseJSONBody(string(raw))
 	if perr != nil {
+		tr.Error = "登录响应不是 JSON"
 		return fmt.Errorf("登录响应不是 JSON（%v）：%s", perr, previewText(string(raw), 300))
 	}
 	token := strings.TrimSpace(ExtractString(root, lg.TokenPath))
 	if token == "" {
+		tr.Error = "登录响应里取不到 token"
 		return fmt.Errorf("登录响应里 %q 取不到 token（实际返回：%s）", lg.TokenPath, previewText(string(raw), 300))
 	}
 	sess.token = token
+	sess.params[param] = token
+	tr.TokenPreview = maskSecret(token)
+	tr.TokenLength = len(token)
 
 	// 登录顺手种下的 Cookie 也带给采集请求（同域才会带）
 	if lg.UseCookies() {
@@ -1369,9 +1508,20 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 			if cks := jar.Cookies(u); len(cks) > 0 {
 				addCookies(sess.cookies, origin, cks)
 				sess.cookieCount += len(cks)
+				for _, c := range cks {
+					if c != nil && strings.TrimSpace(c.Name) != "" {
+						tr.Cookies = append(tr.Cookies, c.Name)
+					}
+				}
 			}
 		}
+		tr.Cookies = dedupeStrings(tr.Cookies)
 	}
+	note := "token 已写入公共参数 " + param + "（之后接口里可以直接写 {{" + param + "}}）"
+	if !lg.UseCookies() {
+		note = "with_cookies=false：登录返回的 Set-Cookie 没有带进采集请求；" + note
+	}
+	tr.Note = note
 
 	if ttl > 0 {
 		h.cookieMu.Lock()
@@ -1379,6 +1529,32 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 		h.cookieMu.Unlock()
 	}
 	return nil
+}
+
+// TestLogin 只跑一次登录接口（不落库、不吃缓存），返回脱敏后的完整过程。
+// 控制台「测试登录」用它确认地址 / 请求体 / token 取值路径对不对。
+func (h *Harvester) TestLogin(ctx context.Context, task *model.HarvestTask, tk model.HarvestToken) (*LoginTrace, []string, error) {
+	if task == nil {
+		return nil, nil, fmt.Errorf("任务不存在")
+	}
+	task.Normalize()
+	tke := tk.Effective()
+	if tke.Source == "" || tke.Source == "none" {
+		tke.Source = "login"
+	}
+	tke.CacheSeconds = 0
+	sess := sessionScaffold(task)
+	sess.source = model.SessionSourceHTTP
+	err := h.loginToken(ctx, task, tke, &sess)
+	var applied []string
+	if sess.token != "" {
+		applied = append(applied, "参数:"+orDefaultStr(tke.Param, "token"))
+		applied = append(applied, "请求头:"+orDefaultStr(tke.Header, "Authorization"))
+	}
+	if names := cookieNameList(sess); len(names) > 0 {
+		applied = append(applied, "Cookie:"+strings.Join(names, "、"))
+	}
+	return sess.loginTrace, applied, err
 }
 
 // addCookies 往会话里追加 Cookie（同一站点多渠道来的就合并，不互相覆盖）。
@@ -1918,14 +2094,23 @@ func (h *Harvester) SelfTest(ctx context.Context, task model.HarvestTask, withPr
 		rep.Steps = append(rep.Steps, SelfTestStep{Title: title, OK: ok, Detail: fmt.Sprintf(format, args...)})
 	}
 
-	// 1) 会话配置：只有一种——前置登录把浏览器登好，Cookie/请求头全部从浏览器取
+	// 1) 会话配置：来源决定 Cookie / token 从哪儿来
 	plText := "未配置（直接用浏览器当前登录态）"
 	if task.Prelogin != nil && task.Prelogin.Active() {
 		plText = "启用（" + task.Prelogin.ModeText() + "）"
 	}
-	add("会话配置", true, "浏览器会话 · 前置登录=%s · 站点=%q · 请求头=%s · 启用接口 %d 个",
-		plText, orDefaultStr(task.Session.Host, "（自动取起始页/第一个接口）"),
+	src := task.Session.EffectiveSource()
+	tkText := "未配置"
+	if task.Session.Token != nil && task.Session.Token.Enabled() {
+		tkText = task.Session.Token.Effective().Source
+	}
+	detail := fmt.Sprintf("来源=%s · 前置登录=%s · 站点=%q · 请求头=%s · 启用接口 %d 个",
+		task.Session.SourceText(), plText, orDefaultStr(task.Session.Host, "（自动取起始页/第一个接口）"),
 		task.Session.EffectiveHeaderMode(), task.EndpointCount())
+	if src == model.SessionSourceHTTP {
+		detail += fmt.Sprintf(" · 登录接口=%q · token 来源=%s", loginSummary(task.Session), tkText)
+	}
+	add("会话配置", true, "%s", detail)
 
 	// 1.5) 登录变量：录制时密码框被脱敏成 {{password}}，必须靠它注入
 	if task.Prelogin != nil && task.Prelogin.Active() {
@@ -1941,8 +2126,10 @@ func (h *Harvester) SelfTest(ctx context.Context, task model.HarvestTask, withPr
 		}
 	}
 
-	// 2) 前置登录
-	if task.Prelogin != nil && task.Prelogin.Active() {
+	// 2) 前置登录（只有会话来源是 ui 才需要）
+	if src != model.SessionSourceUI {
+		add("前置登录", true, "会话来源是「%s」，不需要 UI 自动化登录", task.Session.SourceText())
+	} else if task.Prelogin != nil && task.Prelogin.Active() {
 		if withPrelogin {
 			start := time.Now()
 			if err := h.runPreloginQuiet(ctx, &task); err != nil {
@@ -1971,7 +2158,9 @@ func (h *Harvester) SelfTest(ctx context.Context, task model.HarvestTask, withPr
 			urls = append(urls, o)
 		}
 	}
-	if len(urls) == 0 {
+	if src != model.SessionSourceUI {
+		add("浏览器 Cookie", true, "会话来源是「%s」，不依赖浏览器 Cookie", task.Session.SourceText())
+	} else if len(urls) == 0 {
 		add("浏览器 Cookie", false, "任务里没有可用的接口 URL，判断不了站点")
 	} else if total, names, err := h.profileCookies(ctx, urls); err != nil {
 		add("浏览器 Cookie", false, "读取失败：%v", err)
@@ -2071,6 +2260,15 @@ func (h *Harvester) SelfTest(ctx context.Context, task model.HarvestTask, withPr
 	return rep
 }
 
+// loginSummary 登录接口的一句话描述（自检 / 日志用）。
+func loginSummary(s model.HarvestSession) string {
+	if s.Token == nil || s.Token.Login == nil {
+		return "未配置"
+	}
+	lg := s.Token.Login.Effective()
+	return orDefaultStr(strings.ToUpper(strings.TrimSpace(lg.Method)), "POST") + " " + strings.TrimSpace(lg.URL)
+}
+
 // profileCookies 浏览器 profile 里与该站点相关的 Cookie（名字@域名，用于自检）。
 func (h *Harvester) profileCookies(ctx context.Context, urls []string) (int, []string, error) {
 	openCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -2111,9 +2309,16 @@ func orDefaultStr(v, def string) string {
 	return v
 }
 
-// sessionLabel 会话来源的中文名（现在只有一种：内置浏览器登录态）。
+// sessionLabel 会话来源的中文名。
 func sessionLabel(s model.HarvestSession) string {
-	return "内置浏览器（Cookie + 请求头）"
+	switch s.EffectiveSource() {
+	case model.SessionSourceHTTP:
+		return "登录接口换 token"
+	case model.SessionSourceImport:
+		return "仅导入（公共参数 / Cookie）"
+	default:
+		return "内置浏览器（Cookie + 请求头）"
+	}
 }
 
 func describeSink(cfg model.HarvestSink) string {
@@ -2252,8 +2457,12 @@ type PreviewResult struct {
 	Response *PreviewResponseInfo `json:"response,omitempty"`
 	// Process 这次试抓干了什么：会话 → 公共参数 → 变量 → 分页 → 请求 → 响应
 	Process []string `json:"process,omitempty"`
-	// Session 这次试抓用的登录态摘要（Cookie 个数、浏览器头个数）
+	// Session 这次试抓用的登录态摘要（来源、Cookie 个数、浏览器头个数、token 长度）
 	Session string `json:"session,omitempty"`
+	// Login 来源是「登录接口」时，这次登录调用的完整过程（脱敏）
+	Login *LoginTrace `json:"login,omitempty"`
+	// SessionTrace 会话是怎么拼出来的：来源、Cookie 名单、token、参数绑定（脱敏）
+	SessionTrace *SessionTrace `json:"session_trace,omitempty"`
 }
 
 // PreviewRequestInfo 试抓实际发出去的请求。请求头 / query / 变量里的敏感值都已打码，
@@ -2374,6 +2583,8 @@ func (h *Harvester) Preview(ctx context.Context, task model.HarvestTask, limit i
 		pr.Request = buildPreviewRequest(sel, target, reqBody, sess, pg, &tr, retries, elapsed)
 		pr.Response = buildPreviewResponse(status, &tr, raw)
 		pr.Session = sessionSummary(task.Session, sess)
+		pr.Login = sess.loginTrace
+		pr.SessionTrace = buildSessionTrace(task.Session, sess, refreshed, scriptRan)
 		pr.Process = append(append([]string{}, prep...), endpointProcess(sel, pg, vars, &tr, retries, elapsed, reqBody)...)
 
 		if ferr != nil {
@@ -2583,6 +2794,9 @@ func sessionSummary(s model.HarvestSession, sess resolvedSession) string {
 	}
 	if len(sess.headers) > 0 {
 		parts = append(parts, "浏览器头 "+strconv.Itoa(len(sess.headers))+" 个")
+	}
+	if sess.token != "" {
+		parts = append(parts, "Token "+strconv.Itoa(len(sess.token))+" 字符")
 	}
 	if sess.referer != "" {
 		parts = append(parts, "Referer "+sess.referer)
