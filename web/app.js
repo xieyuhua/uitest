@@ -34,6 +34,7 @@
     hover: '悬停',
     wait: '等待',
     upload: '上传',
+    captcha: 'AI 验证码',
     assert: '断言',
     script: '脚本'
   };
@@ -60,7 +61,7 @@
   var TERMINAL = { passed: 1, failed: 1, canceled: 1 };
 
   // 步骤行内可编辑字段
-  var STEP_FIELDS = ['annotation', 'value', 'data_key', 'expect'];
+  var STEP_FIELDS = ['action', 'annotation', 'value', 'data_key', 'expect'];
 
   // 需要数据字段（data_key）的动作
   var DATA_ACTIONS = ['input', 'select', 'upload'];
@@ -1537,11 +1538,39 @@
       return h + '</div>';
     }
 
+    // 行编辑草稿：首次使用时用服务端当前值初始化，避免把空值当成「改动」
+    function draftOf(step) {
+      var d = ui.drafts[step.id];
+      if (!d) {
+        d = {};
+        STEP_FIELDS.forEach(function (f) {
+          d[f] = step[f] === undefined || step[f] === null ? '' : String(step[f]);
+        });
+        ui.drafts[step.id] = d;
+      }
+      return d;
+    }
+
+    // 动作列：下拉切换（录制后再改成「AI 验证码」等动作，不用重录）
+    function actionCellHtml(step) {
+      var cur = step.action || '';
+      var keys = Object.keys(ACTION_LABEL);
+      if (cur && keys.indexOf(cur) < 0) keys.unshift(cur);
+      var opts = keys.map(function (k) {
+        return '<option value="' + esc(k) + '"' + (k === cur ? ' selected' : '') + '>' +
+          esc(ACTION_LABEL[k] || k) + '</option>';
+      }).join('');
+      return '<select class="input input--cell input--tiny" data-edit="action" title="' + esc(cur) + '">' + opts + '</select>';
+    }
+
     function valueCellHtml(step, d) {
       var needsKey = DATA_ACTIONS.indexOf(step.action) >= 0 || !!d.data_key;
       var val = d.value === undefined ? '' : d.value;
+      var ph = step.action === 'captcha'
+        ? '填空题目标（可留空自动找），如 css=#captcha-code'
+        : '输入值，支持 {{变量}}';
       return '<div class="value-cell">' +
-        '<input class="input input--cell input--mono" data-edit="value" value="' + esc(val) + '" placeholder="输入值，支持 {{变量}}">' +
+        '<input class="input input--cell input--mono" data-edit="value" value="' + esc(val) + '" placeholder="' + esc(ph) + '">' +
         (needsKey ? '<input class="input input--cell input--tiny input--mono" data-edit="data_key" value="' + esc(d.data_key) + '" placeholder="data_key（数据字段名）">' : '') +
         (hasVars(val) ? '<div class="var-line">' + highlightVars(val) + '</div>' : '') +
         '</div>';
@@ -1557,11 +1586,11 @@
     }
 
     function stepRowHtml(step, index, total) {
-      var d = ui.drafts[step.id] || { annotation: '', value: '', data_key: '', expect: '' };
+      var d = draftOf(step);
       var dirty = isDirty(step);
       return '<tr data-step="' + esc(step.id) + '"' + (dirty ? ' class="is-dirty"' : '') + '>' +
         '<td class="w-idx mono">' + (index + 1) + '</td>' +
-        '<td class="w-action"><span class="action-tag" title="' + esc(step.action || '') + '">' + esc(actionLabel(step.action)) + '</span>' +
+        '<td class="w-action">' + actionCellHtml(step) +
         (step.optional ? ' <span class="chip chip--mini">可选</span>' : '') + '</td>' +
         '<td class="w-target">' + targetCellHtml(step) + '</td>' +
         '<td class="w-locator" data-cell="locator">' + locatorCellHtml(step, isLocOpen(step)) + '</td>' +
@@ -2150,10 +2179,12 @@
       var tr = t.closest('tr[data-step]');
       if (!tr) return;
       var sid = tr.getAttribute('data-step');
-      if (!ui.drafts[sid]) ui.drafts[sid] = { annotation: '', value: '', data_key: '', expect: '' };
-      ui.drafts[sid][fieldName] = t.value;
-
       var step = findStep(sid);
+      if (!ui.drafts[sid]) {
+        if (step) draftOf(step);
+        else ui.drafts[sid] = { action: '', annotation: '', value: '', data_key: '', expect: '' };
+      }
+      ui.drafts[sid][fieldName] = t.value;
       var dirty = isDirty(step);
       tr.classList.toggle('is-dirty', dirty);
       var saveBtn = tr.querySelector('[data-act="step-save"]');

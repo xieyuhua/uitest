@@ -24,6 +24,7 @@ import (
 
 	jsruntime "uitest-server/runtime"
 
+	"uitest-server/internal/ai"
 	"uitest-server/internal/browser"
 	"uitest-server/internal/bus"
 	"uitest-server/internal/model"
@@ -341,6 +342,8 @@ func (r *Runner) execStep(ctx context.Context, runID string, page *browser.Page,
 		}
 	case "upload":
 		failure = r.execUpload(stepCtx, page, step, value, &res)
+	case "captcha":
+		failure = r.execCaptcha(stepCtx, runID, page, step, value, &res)
 	case "wait":
 		// 纯数字 = 固定等待：直接在这里睡，不经过页面 JS。
 		// 点完登录按钮页面常常立刻跳转，页面里的 JS 上下文会随旧文档一起销毁，
@@ -438,6 +441,143 @@ func (r *Runner) execStep(ctx context.Context, runID string, page *browser.Page,
 	}
 	r.appendStepResult(runID, res)
 	return res
+}
+
+// captchaInfo 对应 runtime/uitest-keys.js 里 captchaInfo() 的返回。
+type captchaInfo struct {
+	OK       bool    `json:"ok"`
+	Message  string  `json:"message"`
+	Used     string  `json:"used"`
+	Healed   bool    `json:"healed"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Height   float64 `json:"height"`
+	CSS      string  `json:"css"`
+	FillCSS  string  `json:"fill_css"`
+	FillUsed string  `json:"fill_used"`
+	UID      string  `json:"uid"`
+	Label    string  `json:"label"`
+	URL      string  `json:"url"`
+}
+
+// captchaStrategies 「输入值」里可以写的填空目标写法：css=#code、uid=xxx 等。
+var captchaStrategies = map[string]bool{
+	"css": true, "xpath": true, "id": true, "name": true, "label": true,
+	"placeholder": true, "text": true, "uid": true, "attr": true, "role": true,
+}
+
+func splitLocatorSpec(spec string) (string, string, bool) {
+	spec = strings.TrimSpace(spec)
+	for i := 0; i < len(spec); i++ {
+		if spec[i] == '=' || spec[i] == ':' {
+			st := strings.ToLower(strings.TrimSpace(spec[:i]))
+			if captchaStrategies[st] {
+				v := strings.TrimSpace(spec[i+1:])
+				if v != "" {
+					return st, v, true
+				}
+			}
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+// execCaptcha 前置动作：把验证码图片截出来交给视觉模型识别，再写进输入框。
+//   - 步骤的定位 / 目标描述 = 验证码图片本身
+//   - 步骤的「输入值」可选：css=#captcha-code（留空则自动找同表单里最像验证码的输入框）
+//   - 步骤的备注 note 会作为识别提示拼进提示词（例如「4 位数字」）
+func (r *Runner) execCaptcha(ctx context.Context, runID string, page *browser.Page, step model.Step, fillSpec string, res *model.StepResult) string {
+	cfg := r.store.Settings().AI
+	if !ai.CaptchaReady(cfg) {
+		return "AI 验证码识别未配置：设置 → AI 里填写 base_url / api_key / model（建议再单独填 vision_model，需支持图片输入）"
+	}
+	if err := r.ensureRuntime(ctx, page); err != nil {
+		return "注入运行时失败：" + err.Error()
+	}
+
+	rawReq, _ := json.Marshal(map[string]any{"locator": step.Locator, "target": step.Target})
+	expr := fmt.Sprintf(`(() => {
+  if (!window.__uitestKeys) return {ok:false, message:"页面运行时未注入（可能是 CSP 拦截或页面已跳走）"};
+  if (!window.__uitestKeys.captchaInfo) return {ok:false, message:"页面运行时版本过旧，请刷新页面后重试"};
+  return window.__uitestKeys.captchaInfo(%s);
+})()`, rawReq)
+	var info captchaInfo
+	if err := page.EvalInto(ctx, expr, &info); err != nil {
+		return "定位验证码图片失败：" + err.Error()
+	}
+	if !info.OK {
+		return firstNonEmpty(info.Message, "验证码图片未找到")
+	}
+	if info.Width < 4 || info.Height < 4 {
+		return fmt.Sprintf("验证码区域太小（%.0f×%.0f），无法识别", info.Width, info.Height)
+	}
+
+	img, err := page.ScreenshotClip(ctx, info.X, info.Y, info.Width, info.Height)
+	if err != nil {
+		return "截取验证码图片失败：" + err.Error()
+	}
+	res.LocatorUsed = info.Used
+	res.Healed = info.Healed
+	if shot := r.saveImage(runID, fmt.Sprintf("step_%02d_captcha", step.Index), img); shot != "" {
+		res.Screenshot = shot
+	}
+
+	out, err := ai.RecognizeCaptcha(ctx, cfg, img, step.Note)
+	if err != nil {
+		return "AI 识别验证码失败：" + err.Error()
+	}
+	r.logf(runID, "info", step.Index, "AI 识别验证码 → %s（模型 %s，%dms）", out.Text, out.Model, out.DurationMS)
+
+	// 填空目标：优先步骤「输入值」里显式写的定位，否则用运行时自动找到的同表单输入框。
+	loc := model.Locator{Strategy: "css", Value: strings.TrimSpace(info.FillCSS)}
+	if spec := strings.TrimSpace(fillSpec); spec != "" {
+		if st, v, ok := splitLocatorSpec(spec); ok {
+			loc = model.Locator{Strategy: st, Value: v}
+		} else {
+			loc = model.Locator{Strategy: "css", Value: spec}
+		}
+	}
+	if strings.TrimSpace(loc.Value) == "" {
+		return fmt.Sprintf("已识别出验证码 %s，但没找到要填入的输入框：请在该步骤的「输入值」里填写填空目标，例如 css=#captcha-code", out.Text)
+	}
+
+	fillReq, _ := json.Marshal(map[string]any{
+		"action": "input", "locator": loc, "target": step.Target,
+		"value": out.Text, "timeoutMs": r.actionTimeoutMS(),
+	})
+	fillExpr := fmt.Sprintf(`(async () => {
+  if (!window.__uitestKeys) return {ok:false, message:"页面运行时未注入"};
+  return await window.__uitestKeys.runAction(%s);
+})()`, fillReq)
+	var filled actionResult
+	if err := page.EvalInto(ctx, fillExpr, &filled); err != nil {
+		return "写入验证码输入框异常：" + err.Error()
+	}
+	if !filled.OK {
+		return fmt.Sprintf("已识别出验证码 %s，但写入输入框失败：%s", out.Text, filled.Message)
+	}
+	res.ValueUsed = out.Text
+	res.Message = fmt.Sprintf("AI 识别验证码 %s（模型 %s，%dms），已写入输入框", out.Text, out.Model, out.DurationMS)
+	return ""
+}
+
+// saveImage 把图片落盘到 data/runs/{runID}/ 下，返回相对路径。
+func (r *Runner) saveImage(runID, name string, data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	rel := filepath.Join("data", "runs", runID)
+	abs := filepath.Join(r.store.Dir(), "runs", runID)
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return ""
+	}
+	file := name + ".png"
+	if err := os.WriteFile(filepath.Join(abs, file), data, 0o644); err != nil {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Join(rel, file))
 }
 
 // execUpload 处理文件上传：先定位元素拿唯一选择器，再用 CDP 注入本地文件。

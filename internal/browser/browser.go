@@ -648,6 +648,28 @@ func (p *Page) Screenshot(ctx context.Context) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(res.Data)
 }
 
+// ScreenshotClip 截取页面上的一块区域（CSS 像素，页面坐标系）。
+// 验证码识别用它只把验证码图片本身发出去，避免整页截图泄露其它内容。
+func (p *Page) ScreenshotClip(ctx context.Context, x, y, w, h float64) ([]byte, error) {
+	if w <= 0 || h <= 0 {
+		return nil, errors.New("截图区域无效")
+	}
+	var res struct {
+		Data string `json:"data"`
+	}
+	params := map[string]any{
+		"format": "png",
+		"clip": map[string]any{
+			"x": x, "y": y, "width": w, "height": h, "scale": 1,
+		},
+		"captureBeyondViewport": true,
+	}
+	if err := p.call(ctx, "Page.captureScreenshot", params, &res); err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(res.Data)
+}
+
 // SetFileInput 给 file input 设置本地文件（css 为唯一选择器）。
 func (p *Page) SetFileInput(ctx context.Context, css string, files []string) error {
 	var doc struct {

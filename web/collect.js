@@ -347,23 +347,25 @@
         '在登录后的内置浏览器页面里执行，可读 localStorage / cookie；返回 {"params":{…},"headers":{…}}，' +
         '返回 {"token":"…"} 会自动写成 Authorization: Bearer &lt;token&gt;') +
       '</div>' +
-      '<div class="ds-block"><div class="ds-block-title"><span>前置登录（UI 自动化）</span>' +
-      '<span class="muted">唯一的登录方式：运行前在浏览器里真点一遍，登录态直接共享给抓取</span></div>' +
+      '<div class="ds-block"><div class="ds-block-title"><span>前置动作（UI 自动化）</span>' +
+      '<span class="muted">采集之前先在浏览器里把该点的点完：打开网页 → 输入 → AI 验证码 → 点击提交</span></div>' +
       '<label class="check-line"><input type="checkbox" id="' + pfx + '_plon"' + (pl.enabled ? ' checked' : '') +
-      '> 运行前先在浏览器里登录（Cookie / 请求头随登录状态变化就靠它）</label>' +
-      '<div class="field-hint" style="margin:2px 0 8px">登录跑完立刻重新导出会话：' +
-      'Cookie、User-Agent、Authorization 等一律用浏览器里的最新值，只有 URL / 请求体按接口配置。</div>' +
+      '> 运行前先跑一遍前置动作（Cookie / 请求头随登录状态变化就靠它）</label>' +
+      '<div class="field-hint" style="margin:2px 0 8px">跑完立刻重新导出会话：' +
+      'Cookie、User-Agent、Authorization 等一律用浏览器里的最新值，只有 URL / 请求体按接口配置。' +
+      '需要识别验证码时，录制里那一步的动作改成「AI 验证码」即可（插件里 Alt+Shift+点击图片也能直接标记）。</div>' +
       fld('登录用变量（一行一个 key=value，支持 {{env:XXX}}）',
         textareaHtml(pfx + '_plvars', varsToText(pl.vars), 3, 'placeholder=\'password={{env:SITE_PASS}}\''),
         '录制器会把密码框脱敏成 {{password}}：这里必须填 password=真实密码，回放时才真的能登录（值支持 {{env:XXX}}）') +
       '<div class="form-grid">' +
-      fld('登录流程录制', '<select class="input" id="' + pfx + '_plrec" data-rec>' + recOptions(pl.recording_id) + '</select>',
-        '在「UI 自动化」里录一段登录：打开登录页 → 输账号密码 → 点登录；运行时真的在浏览器里走一遍') +
+      fld('前置动作录制', '<select class="input" id="' + pfx + '_plrec" data-rec>' + recOptions(pl.recording_id) + '</select>',
+        '在「UI 自动化」里录一段：打开登录页 → 输账号密码 →（验证码）→ 点登录；运行时真的在浏览器里走一遍') +
       fld('触发时机', selectHtml(pfx + '_plmode', [['always', '每次运行前都跑'], ['on-fail', '只在会话失效（401/403）时跑']], pl.mode || 'always')) +
       fld('超时（秒）', numHtml(pfx + '_pltimeout', pl.timeout_seconds || 180, 'min="30" max="3600"')) +
       '</div>' +
       '<label class="check-line"><input type="checkbox" id="' + pfx + '_plcontinue"' + (pl.continue_on_error ? ' checked' : '') +
       '> 登录失败也继续抓（默认：本次运行直接失败，不放行空数据）</label>' +
+      '<div class="rec-steps" id="' + pfx + '_plsteps"></div>' +
       '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
       (pfx === 'tk' ? '<button class="btn btn--sm" data-act="run-prelogin">现在跑一次</button>' : '') +
       '<span class="muted" id="pl_result"></span>' +
@@ -566,8 +568,57 @@
   }
 
   /** 公共参数工具条：粘贴导入 / 从录制汇总 / 登录后刷新（建任务弹窗与任务详情共用） */
+  /* --- 前置动作录制：把选中的录制步骤列出来，确认「打开→输入→验证码→提交」顺序 --- */
+
+  var PL_ACTION_LABEL = {
+    navigate: '打开页面', input: '输入', click: '点击', select: '选择', check: '勾选',
+    uncheck: '取消勾选', key: '按键', hover: '悬停', wait: '等待', upload: '上传',
+    captcha: 'AI 验证码', assert: '断言', script: '脚本'
+  };
+
+  var PL_STEPS_CACHE = {};
+
+  function paintPreloginSteps(box, rec) {
+    var steps = (rec && rec.steps) || [];
+    if (!steps.length) {
+      box.innerHTML = '<span class="muted">这个录制里还没有步骤</span>';
+      return;
+    }
+    box.innerHTML = '<div class="field-hint" style="margin:0 0 6px">执行顺序（共 ' + steps.length + ' 步）：</div>' +
+      '<ol class="pl-steps">' + steps.map(function (s) {
+        var label = PL_ACTION_LABEL[s.action] || s.action || '—';
+        var what = s.annotation || (s.target && (s.target.label || s.target.text)) || s.value || '';
+        return '<li><span class="chip chip--mini">' + esc(label) + '</span> ' +
+          (s.action === 'captcha' ? '<span class="muted">识别后写入输入框</span>' : esc(String(what).slice(0, 60))) + '</li>';
+      }).join('') + '</ol>';
+  }
+
+  function renderPreloginSteps(root, pfx) {
+    var box = root.querySelector('#' + pfx + '_plsteps');
+    var sel = root.querySelector('#' + pfx + '_plrec');
+    if (!box) return;
+    var id = sel ? sel.value : '';
+    if (!id) { box.innerHTML = '<span class="muted">还没选前置动作录制</span>'; return; }
+    if (PL_STEPS_CACHE[id]) { paintPreloginSteps(box, PL_STEPS_CACHE[id]); return; }
+    box.innerHTML = '<span class="muted">加载步骤…</span>';
+    api('GET', '/api/recordings/' + encodeURIComponent(id), undefined, { silent: true })
+      .then(function (res) {
+        var rec = (res && res.data) ? res.data : res;
+        PL_STEPS_CACHE[id] = rec;
+        paintPreloginSteps(box, rec);
+      })
+      .catch(function () { box.innerHTML = '<span class="muted">步骤加载失败</span>'; });
+  }
+
   function bindCommonActions(root, pfx, ctx) {
     ctx = ctx || {};
+    // 前置动作录制：切换时刷新步骤预览（放在 early-return 之前，重复渲染也能补绑）
+    var plSel = root.querySelector('#' + pfx + '_plrec');
+    if (plSel && plSel.getAttribute('data-pl-bound') !== '1') {
+      plSel.setAttribute('data-pl-bound', '1');
+      plSel.addEventListener('change', function () { renderPreloginSteps(root, pfx); });
+      loadRecordings().then(function () { renderPreloginSteps(root, pfx); });
+    }
     var block = root.querySelector('[data-cm-block="' + pfx + '"]');
     if (!block || block.getAttribute('data-cm-bound') === '1') return;
     block.setAttribute('data-cm-bound', '1');

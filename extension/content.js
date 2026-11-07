@@ -256,7 +256,8 @@
     }
     ov.label.textContent = '● 录制中 · ' + localStepCount + ' 步' +
       (netOn ? (' · ' + localNetCount + ' 接口') : '');
-    ov.host.title = state.recordingName ? ('录制：' + state.recordingName) : '';
+    ov.host.title = (state.recordingName ? ('录制：' + state.recordingName) : '') +
+      ' · Alt+Shift+点击图片 = 标记 AI 验证码';
   }
 
   /** 移除浮层 */
@@ -496,6 +497,8 @@
         return '取消勾选【' + (label || text || tag) + '】';
       case 'upload':
         return '上传文件到【' + fieldLabel + '】';
+      case 'captcha':
+        return 'AI 识别验证码【' + (label || text || tag) + '】并写入输入框';
       case 'key':
         return '在【' + fieldLabel + '】按 ' + (value || 'Enter') + ' 键';
       case 'navigate':
@@ -617,6 +620,16 @@
     if (raw && raw.nodeType === 3) raw = raw.parentElement; // 文本节点
     if (!raw || raw.nodeType !== 1) return;
     if (isIgnored(raw)) return;
+
+    // Alt+Shift+点击 = 标记验证码图片（前置动作：AI 识别后写进同表单输入框）
+    if (ev.altKey && ev.shiftKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      sendStep(buildStep('captcha', raw, {
+        note: 'AI 识别验证码后写入同表单输入框；要指定填空框时在步骤「输入值」里写 css=#captcha-code'
+      }), raw);
+      return;
+    }
 
     var el = KEYS.clickTargetOf(raw);
     if (!el || el.nodeType !== 1) return;

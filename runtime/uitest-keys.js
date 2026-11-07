@@ -23,7 +23,7 @@
   if (window.__uitestKeys && window.__uitestKeys.version === '2.0') return;
 
   var KEY_ATTR = 'data-uitest-id';
-  var VERSION = '2.0';
+  var VERSION = '2.1';
 
   /* ---------------- 基础工具 ---------------- */
 
@@ -907,6 +907,72 @@
     }
   }
 
+  /* ---------------- 验证码：只定位，不操作 ---------------- */
+
+  function captchaInfo(req) {
+    req = req || {};
+    markAll();
+    var found = resolve(req.locator, req.target);
+    if (!found.el) {
+      return {
+        ok: false,
+        message: '验证码图片未找到（已尝试 ' + (found.tried.length ? found.tried.join(' → ') : '无定位') + '）',
+        tried: found.tried
+      };
+    }
+    var el = found.el;
+    el.scrollIntoView && el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    var r = el.getBoundingClientRect();
+    var info = describe(el);
+    var fill = captchaFillTarget(el);
+    return {
+      ok: true,
+      used: found.used,
+      healed: found.healed,
+      tried: found.tried,
+      x: r.left + (window.pageXOffset || 0),
+      y: r.top + (window.pageYOffset || 0),
+      width: r.width,
+      height: r.height,
+      css: uniqueSelector(el),
+      fill_css: fill.css,
+      fill_used: fill.used,
+      uid: el.getAttribute(KEY_ATTR) || '',
+      label: info.label || '',
+      url: location.href
+    };
+  }
+
+  /** 找「验证码要填到哪」：同表单/同容器里第一个可见文本框，名字带 captcha/code 之类的优先 */
+  function captchaFillTarget(imgEl) {
+    var scope = null;
+    try {
+      scope = imgEl.closest('form') ||
+        imgEl.closest('[class*="captcha"],[class*="verify"],[class*="vcode"],[class*="code"]') ||
+        imgEl.parentNode;
+    } catch (e) {
+      scope = imgEl.parentNode;
+    }
+    if (!scope || !scope.querySelectorAll) return { css: '', used: '' };
+    var list = scope.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=image]), textarea, [contenteditable="true"]');
+    var words = ['captcha', 'verify', 'vcode', 'yzm', 'yanzheng', 'code', '验证', '校验'];
+    var best = null, bestScore = 0;
+    for (var i = 0; i < list.length; i++) {
+      var cand = list[i];
+      if (cand === imgEl || !isVisible(cand)) continue;
+      var hay = norm((cand.getAttribute('name') || '') + ' ' + (cand.id || '') +
+        ' ' + (cand.getAttribute('placeholder') || '') + ' ' + (cand.getAttribute('aria-label') || ''));
+      var score = 1;
+      for (var w = 0; w < words.length; w++) {
+        if (hay.indexOf(words[w]) >= 0) { score += 10; break; }
+      }
+      if (score > bestScore) { best = cand; bestScore = score; }
+    }
+    if (!best) return { css: '', used: '' };
+    var sel = uniqueSelector(best);
+    return { css: sel, used: 'css=' + sel };
+  }
+
   window.__uitestKeys = {
     version: VERSION,
     KEY_ATTR: KEY_ATTR,
@@ -929,6 +995,7 @@
     stableId: stableId,
     stableAttr: stableAttr,
     runAction: runAction,
-    checkExpect: checkExpect
+    checkExpect: checkExpect,
+    captchaInfo: captchaInfo
   };
 })();

@@ -464,7 +464,8 @@ select.input{ appearance:auto; }
 .steps-card .table th, .steps-card .table td{ padding:8px 10px; }
 
 .table--steps .w-idx{ width:46px; font-family:var(--mono); color:var(--text-3); }
-.table--steps .w-action{ width:86px; }
+.table--steps .w-action{ width:104px; }
+.table--steps .w-action select{ width:100%; padding:4px 6px; font-size:12px; }
 .table--steps .w-target{ min-width:140px; }
 .table--steps .w-locator{ min-width:162px; }
 .table--steps .w-value{ min-width:150px; }
@@ -1010,3 +1011,8 @@ tbody tr.is-selected{ background:#f5f5ff; }
 .cm-toolbar .muted{ font-size:12px; line-height:1.5; }
 .cm-refresh{ margin:4px 0 8px; padding:10px 12px; border:1px dashed var(--border-2); border-radius:var(--radius-sm); background:var(--bg); }
 .cm-refresh .form-grid{ margin-top:8px; }
+
+/* 前置动作步骤预览（采集页） */
+.rec-steps{ margin-top:10px; }
+.pl-steps{ margin:0; padding-left:18px; display:grid; gap:4px; font-size:12px; color:var(--text-2); }
+.pl-steps li{ line-height:1.5; }
