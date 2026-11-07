@@ -320,13 +320,18 @@ type SessionRefreshPreview struct {
 	SourceText string `json:"source_text,omitempty"`
 	// Login 来源是登录接口时，这次登录调用的过程（脱敏）
 	Login *LoginTrace `json:"login,omitempty"`
+	// RawParams 刷新后的原始参数值（不序列化：只给服务端「写回公共参数」用）
+	RawParams map[string]string `json:"-"`
+	// RawCookies 会话里 Cookie 名 → 原始值（不序列化，同上）
+	RawCookies map[string]string `json:"-"`
 }
 
 // RefreshSessionPreview 按当前浏览器登录态解析一次会话，并执行「登录后刷新公共参数」，
 // 返回脱敏后的结果。控制台「登录后刷新」按钮用它确认 token 到底换没换。
 //
-// 只读：不会把刷出来的 token 存进任务配置（token 会过期，每次运行都应该重新取），
-// 也不会发任何业务请求。
+// 这里只负责「算一遍」：每次运行都会重新登录 / 重新导出会话，所以刷新本身不要求落库；
+// 控制台点「刷新并写回」时，API 层会拿 RawParams / RawCookies 把最新值合并进公共参数，
+// 让任务配置里看到的 token 也是最新的。不会发任何业务请求。
 func (h *Harvester) RefreshSessionPreview(ctx context.Context, task *model.HarvestTask) (SessionRefreshPreview, error) {
 	out := SessionRefreshPreview{}
 	if task == nil {
@@ -349,7 +354,18 @@ func (h *Harvester) RefreshSessionPreview(ctx context.Context, task *model.Harve
 	out.Login = sess.loginTrace
 	out.Applied = h.applySessionRefresh(ctx, "", task, &sess)
 	refreshing := task.Common != nil && task.Common.Refresh.Active()
-	if !refreshing {
+	// 登录接口模式：token 是登录时直接换回来的，不需要再去浏览器请求头里嗅一遍
+	if sess.source == model.SessionSourceHTTP && sess.token != "" {
+		param := "token"
+		if task.Session.Token != nil {
+			param = task.Session.Token.Effective().Param
+		}
+		if !hasString(out.Applied, "参数:"+param) {
+			out.Applied = append([]string{"参数:" + param}, out.Applied...)
+		}
+		out.Notes = append(out.Notes,
+			"登录接口已换到新 token，写入公共参数 "+param+"：之后所有接口都用这份会话，不用再开浏览器")
+	} else if !refreshing {
 		out.Notes = append(out.Notes,
 			"没启用「登录后刷新公共参数」：这次只导出了浏览器会话，不会自动改公共参数（勾选后 token / Cookie 才会自动写进参数）")
 	} else if len(out.Applied) == 0 {
@@ -374,7 +390,47 @@ func (h *Harvester) RefreshSessionPreview(ctx context.Context, task *model.Harve
 	if len(sess.bindings) > 0 {
 		out.Bindings = append([]model.HarvestParamBinding(nil), sess.bindings...)
 	}
+	if len(sess.params) > 0 {
+		out.RawParams = cloneStringMap(sess.params)
+	}
+	if raw := cookieRawValues(sess); len(raw) > 0 {
+		out.RawCookies = raw
+	}
 	return out, nil
+}
+
+// cookieRawValues 会话里 Cookie 名 → 原始值（写回任务配置用，不要拿去做展示）。
+func cookieRawValues(sess resolvedSession) map[string]string {
+	out := map[string]string{}
+	for _, list := range sess.cookies {
+		for _, c := range list {
+			if c == nil || strings.TrimSpace(c.Name) == "" {
+				continue
+			}
+			if _, exists := out[c.Name]; !exists {
+				out[c.Name] = c.Value
+			}
+		}
+	}
+	for name, v := range sess.commonCookies {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		if _, exists := out[name]; !exists {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// hasString 列表里有没有这一项。
+func hasString(list []string, want string) bool {
+	for _, x := range list {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 // cookiePreview 会话里所有 Cookie 名 → 脱敏值（同名取第一个）。

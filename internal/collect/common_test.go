@@ -195,6 +195,32 @@ func TestMergeCommonIntoSuggestKeepsUserValues(t *testing.T) {
 	}
 }
 
+func TestMergeCommonOverrideReplacesSameKeys(t *testing.T) {
+	base := &model.HarvestCommon{
+		Params:  map[string]string{"token": "old-token", "tenant": "t1"},
+		Headers: map[string]string{"X-Tenant": "old"},
+		Cookies: map[string]string{"sid": "old-sid"},
+	}
+	sug := CommonSuggest{
+		Params:  map[string]string{"token": "new-token", "fresh": "1"},
+		Headers: map[string]string{"X-Tenant": "new"},
+		Cookies: map[string]string{"sid": "new-sid"},
+	}
+	out := MergeCommonOverride(base, sug)
+	if out.Params["token"] != "new-token" {
+		t.Errorf("同名参数应被覆盖, got %v", out.Params)
+	}
+	if out.Params["tenant"] != "t1" || out.Params["fresh"] != "1" {
+		t.Errorf("未提供的参数应保留、新参数应补上, got %v", out.Params)
+	}
+	if out.Headers["X-Tenant"] != "new" || out.Cookies["sid"] != "new-sid" {
+		t.Errorf("请求头 / Cookie 应被覆盖, got %v %v", out.Headers, out.Cookies)
+	}
+	if base.Params["token"] != "old-token" {
+		t.Error("不应该改动传入的 base")
+	}
+}
+
 func TestMergeCommonIntoSuggestNilBase(t *testing.T) {
 	out := MergeCommonIntoSuggest(nil, CommonSuggest{Params: map[string]string{"a": "1"}})
 	if out == nil || out.Params["a"] != "1" {

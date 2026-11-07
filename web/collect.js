@@ -308,7 +308,7 @@
       '<div class="cm-toolbar">' +
       '<button class="btn btn--sm" type="button" data-cm="import">粘贴导入（Cookie / Header / cURL）</button>' +
       '<button class="btn btn--sm" type="button" data-cm="suggest">从录制汇总</button>' +
-      (pfx === 'tk' ? '<button class="btn btn--sm" type="button" data-cm="refresh">登录后刷新</button>' : '') +
+      (pfx === 'tk' ? '<button class="btn btn--sm" type="button" data-cm="refresh" title="按当前会话重新取 token / Cookie，并写回下面的公共参数">刷新会话并写回参数</button>' : '') +
       '<span class="muted" data-cm-msg></span>' +
       '</div>' +
       '<div class="form-grid">' +
@@ -330,8 +330,9 @@
       '<label class="check-line"><input type="checkbox" id="' + pfx + '_cmrfon"' +
       (cm.refresh && cm.refresh.enabled ? ' checked' : '') +
       '> 登录后自动刷新公共参数（从浏览器请求头 / Cookie / 本地存储取最新值）</label>' +
-      '<div class="field-hint" style="margin:2px 0 8px">运行顺序：前置登录 → 导出浏览器会话 → 本刷新写入公共参数 → 参数绑定生效。' +
-      '典型用法：登录拿到的 token 写进参数 token，再配一条 token → header:Authorization 的绑定。</div>' +
+      '<div class="field-hint" style="margin:2px 0 8px">运行顺序（三种会话来源都一样）：取会话 → 写进公共参数 → 参数绑定生效 → 发接口请求。' +
+      'UI 自动化来源会先跑前置动作再从浏览器导出；登录接口来源直接调接口换 token（顺带收 Set-Cookie）。' +
+      '点上面的「刷新会话并写回参数」可以立刻把最新 token 写回下面，不用等运行。</div>' +
       '<div class="form-grid">' +
       fld('token 写进哪个参数（留空默认 token）', inputHtml(pfx + '_cmrftoken', (cm.refresh && cm.refresh.token_param) || '', 'placeholder="token"')) +
       fld('从哪个请求头取 token（留空自动找）', inputHtml(pfx + '_cmrfheader', (cm.refresh && cm.refresh.token_header) || '', 'placeholder="Authorization"')) +
@@ -537,16 +538,17 @@
     return { enabled: enabled, token_param: rawToken || 'token', token_header: header, cookies: cookies, storage: storage };
   }
 
-  /** 接口返回的公共参数合并进表单（已有的值不覆盖，导入 / 汇总共用） */
+  /** 接口返回的公共参数合并进表单（同名项用新值覆盖，导入 / 汇总共用） */
   function mergeCommonIntoForm(root, pfx, common) {
     common = common || {};
     var params = parseKV(val(root, pfx + '_cmparams'), '=');
     var headers = textToHeaders(val(root, pfx + '_cmheaders'));
     var cookies = parseKV(val(root, pfx + '_cmcookies'), '=');
     var bindings = parseBindings(val(root, pfx + '_cmbindings'));
+    // 导入 / 汇总拿到的都是刚登录的会话值：同名项必须顶掉旧值，否则刷新不过来
     var mergeMap = function (dst, src) {
       Object.keys(src || {}).forEach(function (k) {
-        if (k && !(k in dst)) dst[k] = src[k];
+        if (k) dst[k] = src[k];
       });
     };
     mergeMap(params, common.params);
@@ -714,7 +716,7 @@
   function openCommonImportModal(root, pfx, ctx, say) {
     var body = '<div class="alert alert--info" style="margin:0 0 10px">' +
       '把浏览器开发者工具里复制的内容直接粘进来：Cookie、请求头、参数或整条 cURL 任填一项即可。' +
-      '解析结果会<strong>合并</strong>进公共参数（已有值不覆盖），点「保存配置」才真正生效。</div>' +
+      '解析结果会<strong>覆盖</strong>公共参数里的同名项（没填的补上），点「保存配置」才真正生效。</div>' +
       '<div class="form-grid">' +
       fld('Cookie（整段 a=b; c=d 也行）', textareaHtml('ci_cookie', '', 3, 'placeholder="SESSION=xxx; token=yyy"')) +
       fld('请求头（一行一个 Name: Value）', textareaHtml('ci_headers', '', 4, 'placeholder="Authorization: Bearer xxx"')) +
@@ -787,6 +789,7 @@
         if (rf.params && Object.keys(rf.params).length) {
           lines.push('参数：' + Object.keys(rf.params).map(function (k) { return k + '=' + rf.params[k]; }).join('，'));
         }
+        if ((res.saved || []).length) lines.push('已写回公共参数：' + res.saved.join('、'));
         (rf.notes || []).forEach(function (n) { lines.push(n); });
         say(lines.join('；') || '刷新完成', false);
         U().openModal({
@@ -794,6 +797,8 @@
           body: refreshResultHtml(rf),
           footer: '<button class="btn" data-modal-close>关闭</button>'
         });
+        // 已经写回任务配置：重新拉一次，让「公共参数」里的值立刻变成最新的（保留当前页签）
+        if ((res.saved || []).length && typeof ctx.reload === 'function') ctx.reload();
       }).catch(function () { say('', true); });
   }
 
@@ -2186,7 +2191,7 @@
       })();
 
       // 公共参数工具条：粘贴导入 / 从录制汇总 / 登录后刷新
-      bindCommonActions(host, 'tk', { taskId: state.id });
+      bindCommonActions(host, 'tk', { taskId: state.id, reload: load });
 
       // 「登录流程录制」下拉需要录制列表：异步补一次（只拉一次）
       loadRecordings().then(function () { refreshRecSelects(host); }).catch(function () { });

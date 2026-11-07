@@ -305,3 +305,67 @@ func TestPreviewUnknownEndpointReportsError(t *testing.T) {
 		t.Fatalf("接口不存在时应返回明确错误, got %+v", out)
 	}
 }
+
+// 登录接口的响应体预览里不能出现 token 原文：很多接口就是 {"code":0,"data":"<token>"}，
+// 字段名 data 不敏感，maskBodyPreview 认不出来，必须拿到 token 后按值再打码一次。
+func TestTestLoginMasksTokenInResponsePreview(t *testing.T) {
+	const token = "secret-token-abcdef1234567890"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Set-Cookie", "demo_sid="+token+"; Path=/; Max-Age=3600")
+		_, _ = w.Write([]byte(`{"code":0,"data":"` + token + `"}`))
+	}))
+	defer srv.Close()
+
+	h := NewHarvester(nil, nil, nil, t.TempDir())
+	task := model.HarvestTask{
+		ID: "t1", StartURL: srv.URL + "/",
+		Endpoints: []model.HarvestEndpoint{{ID: "ep1", Name: "列表", Method: "GET", Enabled: true, URL: srv.URL + "/api/list"}},
+	}
+	tk := model.HarvestToken{
+		Source: "login", Param: "token", Header: "Authorization", Prefix: "Bearer ",
+		Login: &model.HarvestLogin{
+			Method: "POST", URL: srv.URL + "/login",
+			Body:      `{"username":"demo","password":"hunter2hunter2"}`,
+			TokenPath: "data",
+		},
+	}
+	tr, applied, err := h.TestLogin(context.Background(), &task, tk)
+	if err != nil {
+		t.Fatalf("测试登录失败: %v", err)
+	}
+	if tr.TokenLength != len(token) {
+		t.Errorf("token 长度 = %d, want %d", tr.TokenLength, len(token))
+	}
+	if strings.Contains(tr.BodyPreview, token) {
+		t.Errorf("响应体预览里露出了 token 原文: %s", tr.BodyPreview)
+	}
+	if !strings.Contains(tr.BodyPreview, "…") {
+		t.Errorf("响应体预览应按值打码, got %s", tr.BodyPreview)
+	}
+	if strings.Contains(tr.Body, "hunter2hunter2") {
+		t.Errorf("请求体里的密码没打码: %s", tr.Body)
+	}
+	if len(tr.Cookies) == 0 || tr.Cookies[0] != "demo_sid" {
+		t.Errorf("登录 Set-Cookie 应记下来, got %v", tr.Cookies)
+	}
+	found := false
+	for _, x := range applied {
+		if x == "参数:token" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("applied 应包含 参数:token, got %v", applied)
+	}
+}
+
+func TestMaskValueOccurrences(t *testing.T) {
+	in := `{"data":"secret-token-abcdef1234567890"}`
+	if got := maskValueOccurrences(in, "secret-token-abcdef1234567890"); strings.Contains(got, "abcdef1234567890") {
+		t.Errorf("token 应被替换, got %s", got)
+	}
+	if got := maskValueOccurrences("abc", "ab"); got != "abc" {
+		t.Errorf("太短的值不该替换, got %s", got)
+	}
+}

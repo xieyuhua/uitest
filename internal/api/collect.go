@@ -1503,7 +1503,7 @@ func (s *Server) suggestCommon(w http.ResponseWriter, r *http.Request) {
 	}
 	sug := collect.SuggestCommonFromCaptured(entries)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"common":  collect.MergeCommonIntoSuggest(nil, sug),
+		"common":  collect.MergeCommonOverride(nil, sug),
 		"notes":   suggestNotes(sug),
 		"matched": len(entries),
 		"source":  source,
@@ -1529,7 +1529,7 @@ func (s *Server) suggestTaskCommon(w http.ResponseWriter, r *http.Request) {
 	}
 	sug := collect.SuggestCommonFromCaptured(entries)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"common":  collect.MergeCommonIntoSuggest(t.Common, sug),
+		"common":  collect.MergeCommonOverride(t.Common, sug),
 		"notes":   suggestNotes(sug),
 		"matched": len(entries),
 		"source":  source,
@@ -1615,7 +1615,7 @@ func (s *Server) importCommon(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, notes := collect.ParseCommonImport(req)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"common": collect.MergeCommonIntoSuggest(nil, commonSuggestOf(parsed)),
+		"common": collect.MergeCommonOverride(nil, commonSuggestOf(parsed)),
 		"notes":  notes,
 	})
 }
@@ -1634,12 +1634,12 @@ func (s *Server) importTaskCommon(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, notes := collect.ParseCommonImport(req)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"common": collect.MergeCommonIntoSuggest(t.Common, commonSuggestOf(parsed)),
+		"common": collect.MergeCommonOverride(t.Common, commonSuggestOf(parsed)),
 		"notes":  notes,
 	})
 }
 
-// commonSuggestOf 把解析出的公共参数转成建议结构，复用「不覆盖已有值」的合并逻辑。
+// commonSuggestOf 把解析出的公共参数转成建议结构，复用「同名项用新值覆盖」的合并逻辑。
 func commonSuggestOf(c model.HarvestCommon) collect.CommonSuggest {
 	return collect.CommonSuggest{Params: c.Params, Headers: c.Headers, Cookies: c.Cookies, Bindings: c.Bindings}
 }
@@ -1677,10 +1677,92 @@ func (s *Server) refreshTaskCommon(w http.ResponseWriter, r *http.Request) {
 	if rerr != nil {
 		out["ok"] = false
 		out["error"] = rerr.Error()
-		out["hint"] = "先在「登录」页签跑一次前置登录，或在「公共参数 → 粘贴导入」里贴一份 Cookie"
+		out["hint"] = "先在「登录」页签跑一次前置登录 / 填好登录接口，或在「公共参数 → 粘贴导入」里贴一份 Cookie"
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
+	// 刷新到的 token / Cookie 写回任务配置：控制台里看到的公共参数就是最新的，
+	// 下次打开任务/直接运行都按这份来（运行前仍会重新登录一次，保证不过期）。
+	if saved, serr := s.persistRefreshedCommon(&t, prev); serr != nil {
+		out["warning"] = "刷新成功，但写回公共参数失败：" + serr.Error()
+	} else if len(saved) > 0 {
+		prev.Notes = append(prev.Notes,
+			"已把最新值写回任务公共参数："+strings.Join(saved, "、")+"（下次打开任务看到的就是这份）")
+		out["saved"] = saved
+	}
 	out["refresh"] = prev
 	writeJSON(w, http.StatusOK, out)
+}
+
+// persistRefreshedCommon 把「登录后刷新」拿到的最新会话值合并进任务的公共参数。
+//
+// 原因：登录换到新 token 之后，任务配置里还留着录制时的旧值，打开任务会误以为没生效。
+// 这里只写「参数」，以及「公共 Cookie」里已经声明过的同名 Cookie —— 不会把浏览器里的
+// 统计类 Cookie 一股脑抄进配置。运行前依旧会重新登录，所以存的是最近一次的真实值。
+func (s *Server) persistRefreshedCommon(t *model.HarvestTask, prev collect.SessionRefreshPreview) ([]string, error) {
+	if t == nil || strings.TrimSpace(t.ID) == "" {
+		return nil, nil
+	}
+	var params, cookies []string
+	for k, v := range prev.RawParams {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		if t.Common != nil && t.Common.Params[k] == v {
+			continue
+		}
+		params = append(params, k)
+	}
+	if t.Common != nil {
+		for name, v := range prev.RawCookies {
+			name = strings.TrimSpace(name)
+			v = strings.TrimSpace(v)
+			if name == "" || v == "" || t.Common.Cookies[name] == v {
+				continue
+			}
+			if _, declared := t.Common.Cookies[name]; !declared {
+				continue
+			}
+			cookies = append(cookies, name)
+		}
+	}
+	if len(params) == 0 && len(cookies) == 0 {
+		return nil, nil
+	}
+	sort.Strings(params)
+	sort.Strings(cookies)
+	_, err := s.DB.MutateHarvestTask(t.ID, func(x *model.HarvestTask) {
+		if x.Common == nil {
+			x.Common = &model.HarvestCommon{}
+		}
+		if len(params) > 0 {
+			if x.Common.Params == nil {
+				x.Common.Params = map[string]string{}
+			}
+			for _, k := range params {
+				x.Common.Params[k] = strings.TrimSpace(prev.RawParams[k])
+			}
+		}
+		if len(cookies) > 0 {
+			if x.Common.Cookies == nil {
+				x.Common.Cookies = map[string]string{}
+			}
+			for _, name := range cookies {
+				x.Common.Cookies[name] = strings.TrimSpace(prev.RawCookies[name])
+			}
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	saved := make([]string, 0, len(params)+len(cookies))
+	for _, k := range params {
+		saved = append(saved, "参数:"+k)
+	}
+	for _, name := range cookies {
+		saved = append(saved, "Cookie:"+name)
+	}
+	return saved, nil
 }

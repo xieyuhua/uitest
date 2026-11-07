@@ -1497,6 +1497,9 @@ func (h *Harvester) loginToken(ctx context.Context, task *model.HarvestTask, tk 
 		tr.Error = "登录响应里取不到 token"
 		return fmt.Errorf("登录响应里 %q 取不到 token（实际返回：%s）", lg.TokenPath, previewText(string(raw), 300))
 	}
+	// 很多登录接口的响应就是 {"data":"<token>"}，字段名本身不敏感，maskBodyPreview 认不出来；
+	// 这里拿到 token 之后再按值打码一次，避免「登录过程」把 token 原样展示出来。
+	tr.BodyPreview = maskValueOccurrences(tr.BodyPreview, token)
 	sess.token = token
 	sess.params[param] = token
 	tr.TokenPreview = maskSecret(token)
@@ -3480,6 +3483,16 @@ func maskIfSensitive(name, value string) string {
 }
 
 // maskRequestBody 请求体展示：JSON 按字段名递归打码，表单按参数名打码，其它原样（只做长度保护）。
+// maskValueOccurrences 把文本里出现的敏感值替换成脱敏形式（登录响应体预览用）。
+// 太短的值（<8 字符）不动：替换了也挡不住什么，反而容易误伤正文。
+func maskValueOccurrences(text, secret string) string {
+	secret = strings.TrimSpace(secret)
+	if text == "" || len(secret) < 8 {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, maskSecret(secret))
+}
+
 func maskRequestBody(body string) string {
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {

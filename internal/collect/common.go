@@ -226,6 +226,18 @@ func sortedBindings(m map[string]model.HarvestParamBinding) []model.HarvestParam
 
 // MergeCommonIntoSuggest 把建议合并进已有公共参数：用户已经填了的项不覆盖。
 func MergeCommonIntoSuggest(base *model.HarvestCommon, sug CommonSuggest) *model.HarvestCommon {
+	return mergeCommon(base, sug, false)
+}
+
+// MergeCommonOverride 和 MergeCommonIntoSuggest 一样合并，但同名项用新值覆盖。
+//
+// 用在「粘贴导入」「从录制汇总」这类用户明确要刷新会话值的入口：
+// 刚登录拿到的 token / Cookie 必须顶掉旧值，否则会话永远刷新不过来。
+func MergeCommonOverride(base *model.HarvestCommon, sug CommonSuggest) *model.HarvestCommon {
+	return mergeCommon(base, sug, true)
+}
+
+func mergeCommon(base *model.HarvestCommon, sug CommonSuggest, override bool) *model.HarvestCommon {
 	if base == nil {
 		base = &model.HarvestCommon{}
 	}
@@ -244,17 +256,17 @@ func MergeCommonIntoSuggest(base *model.HarvestCommon, sug CommonSuggest) *model
 		out.Cookies = map[string]string{}
 	}
 	for k, v := range sug.Params {
-		if _, exists := out.Params[k]; !exists {
+		if _, exists := out.Params[k]; override || !exists {
 			out.Params[k] = v
 		}
 	}
 	for k, v := range sug.Headers {
-		if _, exists := out.Headers[k]; !exists {
+		if _, exists := out.Headers[k]; override || !exists {
 			out.Headers[k] = v
 		}
 	}
 	for k, v := range sug.Cookies {
-		if _, exists := out.Cookies[k]; !exists {
+		if _, exists := out.Cookies[k]; override || !exists {
 			out.Cookies[k] = v
 		}
 	}
