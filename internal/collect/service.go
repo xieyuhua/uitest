@@ -35,11 +35,13 @@ type Recorder struct {
 //   - browser：服务端内置浏览器，用 CDP 旁路录制（Cap/Page 非空）；
 //   - extension：浏览器插件在你自己的浏览器里录，然后把条目 POST 上来（Cap/Page 为空）。
 type CaptureSession struct {
-	ID        string
-	Source    string // browser | extension
-	Page      *browser.Page
-	Cap       *browser.NetCapture
-	PageURL   string
+	ID      string
+	Source  string // browser | extension
+	Page    *browser.Page
+	Cap     *browser.NetCapture
+	PageURL string
+	// StartURL 用户填的起始地址（含原始 #fragment，不会被浏览器跳转覆盖）
+	StartURL  string
 	StartedAt time.Time
 	Stopped   bool
 	Note      string
@@ -134,6 +136,7 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 		Page:      page,
 		Cap:       cap,
 		PageURL:   startURL,
+		StartURL:  startURL,
 		StartedAt: time.Now(),
 		Note:      note,
 		Deleted:   map[string]bool{},
@@ -214,6 +217,7 @@ func (r *Recorder) StartExternal(pageURL, note, userAgent string, types []string
 		StartedAt: time.Now(),
 		LastAt:    time.Now(),
 		Note:      note,
+		StartURL:  pageURL,
 		UserAgent: userAgent,
 		Entries:   []model.CapturedRequest{},
 		Deleted:   map[string]bool{},
@@ -302,6 +306,18 @@ func (r *Recorder) ingest(id string, items []model.CapturedRequest, manual bool)
 			it.Method = "GET"
 		}
 		if u, err := url.Parse(it.URL); err == nil {
+			// 浏览器发出的 Document 请求本身不带 #fragment（HTTP 不会发送它），
+			// 但 SPA 的 hash 路由（/#/vip_member）就是页面本身。会话里还没有任何
+			// 页面文档时，这条就是起始页：用会话起始地址把 fragment 补回去，
+			// 否则控制台里只能看到一个孤零零的 "/"。
+			if u.Fragment == "" && (u.Path == "" || u.Path == "/") && s.Source == "browser" &&
+				(strings.EqualFold(it.Type, "Document") || strings.EqualFold(it.Kind, "page")) &&
+				noDocumentYet(live, added) {
+				if frag := s.rootFragment(u.Host); frag != "" && frag != "/" {
+					u.Fragment = frag
+					it.URL = u.String()
+				}
+			}
 			it.Host, it.Path, it.Query = u.Host, u.Path, u.RawQuery
 			// hash 路由（/#/vip_member）的 fragment 也算路径的一部分，漏掉就全显示成 "/"
 			if u.Fragment != "" {
@@ -462,6 +478,17 @@ func (r *Recorder) Entries(id string) ([]model.CapturedRequest, bool, error) {
 	if !ok {
 		return nil, false, fmt.Errorf("录制会话不存在或已被清理（服务重启后会清空）")
 	}
+	// 顺手把内置浏览器里的真实地址同步回来：SPA 的 hash 路由（#/vip_member）
+	// 只有浏览器知道，而 Document 请求本身不带 #fragment，不同步就只显示 "/"。
+	if s.Page != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		if raw, err := s.Page.Eval(ctx, "location.href"); err == nil {
+			if cur := strings.TrimSpace(trimQuotes(string(raw))); strings.HasPrefix(strings.ToLower(cur), "http") {
+				s.PageURL = cur
+			}
+		}
+		cancel()
+	}
 	return s.visibleEntries(), true, nil
 }
 
@@ -474,7 +501,53 @@ func (s *CaptureSession) visibleEntries() []model.CapturedRequest {
 	if len(live) == 0 {
 		live = s.Entries
 	}
-	return mergeCaptured(live, s.Manual, s.Deleted)
+	out := mergeCaptured(live, s.Manual, s.Deleted)
+	s.backfillStartFragment(out)
+	return out
+}
+
+// backfillStartFragment 起始页的 Document 请求不带 #fragment（HTTP 不会发送它），
+// 但 SPA 的 hash 路由（/#/vip_member）就是页面本身。这里把会话起始地址的
+// fragment 补到第一张根路径页面文档上，否则控制台里只能看到一个孤零零的 "/"。
+func (s *CaptureSession) backfillStartFragment(items []model.CapturedRequest) {
+	if s.Source != "browser" || len(items) == 0 {
+		return
+	}
+	for i := range items {
+		it := &items[i]
+		if !strings.EqualFold(it.Type, "Document") && !strings.EqualFold(it.Kind, "page") {
+			continue
+		}
+		if u, err := url.Parse(it.URL); err == nil && u.Fragment == "" && (u.Path == "" || u.Path == "/") {
+			if frag := s.rootFragment(u.Host); frag != "" {
+				u.Fragment = frag
+				it.URL = u.String()
+				it.Path = pagePath(u)
+			}
+		}
+		return // 只补第一张页面文档
+	}
+}
+
+// rootFragment 起始页该显示的 #fragment：
+// 浏览器已经跳到别的 hash 路由（#/vip_member）就用浏览器的；
+// 只是被重定向回 "#/"（还没登录）时，用用户填的起始地址，别只显示一个 "/"。
+func (s *CaptureSession) rootFragment(host string) string {
+	pick := func(raw string) (string, string) {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, host) {
+			return "", ""
+		}
+		return u.Fragment, u.Host
+	}
+	if frag, _ := pick(s.PageURL); frag != "" && frag != "/" {
+		return frag
+	}
+	if frag, _ := pick(s.StartURL); frag != "" {
+		return frag
+	}
+	frag, _ := pick(s.PageURL)
+	return frag
 }
 
 // mergeCaptured 按 id 去重合并两组条目；deleted 里的直接丢掉。
@@ -515,13 +588,10 @@ func (r *Recorder) Stop(ctx context.Context, id string) ([]model.CapturedRequest
 	}
 	s.Stopped = true
 	entries := append([]model.CapturedRequest(nil), s.Entries...)
-	deleted := len(s.Deleted)
 	r.mu.Unlock()
 
-	if len(entries) == 0 || deleted > 0 {
-		if list, _, err := r.Entries(id); err == nil {
-			return list, nil
-		}
+	if list, _, err := r.Entries(id); err == nil {
+		return list, nil
 	}
 	return entries, nil
 }
@@ -648,4 +718,19 @@ func trimQuotes(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+// noDocumentYet 会话里是否还没有任何页面文档（用来判断这条是不是起始页）。
+func noDocumentYet(live, added []model.CapturedRequest) bool {
+	for _, x := range live {
+		if strings.EqualFold(x.Type, "Document") || strings.EqualFold(x.Kind, "page") {
+			return false
+		}
+	}
+	for _, x := range added {
+		if strings.EqualFold(x.Type, "Document") || strings.EqualFold(x.Kind, "page") {
+			return false
+		}
+	}
+	return true
 }

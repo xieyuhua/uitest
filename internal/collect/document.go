@@ -399,6 +399,11 @@ func (r *Recorder) ensureDocument(ctx context.Context, id, rawURL, note string) 
 			case <-time.After(150 * time.Millisecond):
 			}
 		}
+		// 浏览器发出的 Document 请求本身不带 #fragment，hash 路由下和 target 永远对不上；
+		// 放宽到"同 host + 同路径"再找一次，找到就直接复用，不再补出重复的一条。
+		if it, ok := r.findDocumentIgnoringFragment(id, target); ok {
+			return it, nil
+		}
 	}
 
 	if evalErr != nil || s.Page == nil {
@@ -423,6 +428,37 @@ func (r *Recorder) ensureDocument(ctx context.Context, id, rawURL, note string) 
 		return model.CapturedRequest{}, err
 	}
 	return item, nil
+}
+
+// findDocumentIgnoringFragment 放宽版：只比 host / 路径 / query，忽略 #fragment，
+// 并且只承认本来就没有 fragment 的那条（浏览器真实发出去的就是它）。
+func (r *Recorder) findDocumentIgnoringFragment(id, target string) (model.CapturedRequest, bool) {
+	tu, err := url.Parse(target)
+	if err != nil || tu.Host == "" {
+		return model.CapturedRequest{}, false
+	}
+	list, ok, err := r.Entries(id)
+	if err != nil || !ok {
+		return model.CapturedRequest{}, false
+	}
+	trim := func(p string) string { return strings.TrimSuffix(p, "/") }
+	for _, it := range list {
+		if !strings.EqualFold(it.Type, "Document") && !strings.EqualFold(it.Kind, "page") {
+			continue
+		}
+		u, err := url.Parse(it.URL)
+		if err != nil || u.Fragment != "" || !strings.EqualFold(u.Host, tu.Host) {
+			continue
+		}
+		if !strings.EqualFold(trim(u.Path), trim(tu.Path)) || u.RawQuery != tu.RawQuery {
+			continue
+		}
+		// 返回一份带 hash 路由的副本：日志和接口回包里显示的就是真实页面地址
+		it.URL = target
+		it.Path = pagePath(tu)
+		return it, true
+	}
+	return model.CapturedRequest{}, false
 }
 
 // findDocument 在录制结果里找 target 这条页面文档（#fragment 参与比较）。
