@@ -58,6 +58,13 @@ type CaptureSession struct {
 	LastAt time.Time
 	// Types 这次录制要抓的资源类型（XHR / Fetch / Document …），列表和详情都会回显，便于确认设置生效
 	Types []string
+	// UI 内置浏览器里的 UI 操作录制器（接口采集顺带录元素操作）
+	UI *browser.UiCapture
+	// Actions 录到的 UI 操作：点击 / 输入 / 下拉 / 勾选 / 路由跳转，
+	// 可以直接生成 UI 操作回放流程，或当定时采集任务的前置登录动作。
+	Actions []model.UiAction
+	// ActionDeleted 被用户删掉的 UI 操作 id（插件会话会重复上报，必须记住）
+	ActionDeleted map[string]bool
 }
 
 // CaptureInfo 会话摘要（列表接口返回）。
@@ -71,6 +78,8 @@ type CaptureInfo struct {
 	Note      string    `json:"note,omitempty"`
 	UserAgent string    `json:"user_agent,omitempty"`
 	Types     []string  `json:"types,omitempty"`
+	// ActionCount 顺带录到的 UI 操作条数（点击 / 输入 / 下拉 …）
+	ActionCount int `json:"action_count,omitempty"`
 }
 
 // normalizeTypes 规范化资源类型（XHR / Fetch / Document …）：去空、去重、大小写统一。
@@ -131,17 +140,21 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 		return CaptureInfo{}, fmt.Errorf("开启网络录制失败：%w", err)
 	}
 	sess := &CaptureSession{
-		ID:        newID("cap_"),
-		Source:    "browser",
-		Page:      page,
-		Cap:       cap,
-		PageURL:   startURL,
-		StartURL:  startURL,
-		StartedAt: time.Now(),
-		Note:      note,
-		Deleted:   map[string]bool{},
-		Types:     types,
+		ID:            newID("cap_"),
+		Source:        "browser",
+		Page:          page,
+		Cap:           cap,
+		PageURL:       startURL,
+		StartURL:      startURL,
+		StartedAt:     time.Now(),
+		Note:          note,
+		Deleted:       map[string]bool{},
+		ActionDeleted: map[string]bool{},
+		Types:         types,
 	}
+	// 接口采集顺带录 UI：点击 / 输入 / 下拉 / 勾选 / 路由跳转，
+	// 之后可以一键生成 UI 操作回放流程（也可当定时采集的前置登录）。
+	r.startUICapture(sess)
 	log.Printf("[collect] 开始录制 %s：types=%v url=%s capture_bodies=%v", sess.ID, types, startURL, captureBodies)
 	// 记下这台浏览器的 UA：定时采集默认复用它（不伪造、不轮换）
 	uaCtx, uaCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -211,17 +224,18 @@ func (r *Recorder) StartExternal(pageURL, note, userAgent string, types []string
 		keep = []string{"XHR", "Fetch", "Document"}
 	}
 	sess := &CaptureSession{
-		ID:        newID("cap_"),
-		Source:    "extension",
-		PageURL:   pageURL,
-		StartedAt: time.Now(),
-		LastAt:    time.Now(),
-		Note:      note,
-		StartURL:  pageURL,
-		UserAgent: userAgent,
-		Entries:   []model.CapturedRequest{},
-		Deleted:   map[string]bool{},
-		Types:     keep,
+		ID:            newID("cap_"),
+		Source:        "extension",
+		PageURL:       pageURL,
+		StartedAt:     time.Now(),
+		LastAt:        time.Now(),
+		Note:          note,
+		StartURL:      pageURL,
+		UserAgent:     userAgent,
+		Entries:       []model.CapturedRequest{},
+		Deleted:       map[string]bool{},
+		ActionDeleted: map[string]bool{},
+		Types:         keep,
 	}
 
 	r.mu.Lock()
@@ -586,6 +600,9 @@ func (r *Recorder) Stop(ctx context.Context, id string) ([]model.CapturedRequest
 	if s.Cap != nil {
 		s.Entries = s.Cap.Stop()
 	}
+	if s.UI != nil {
+		s.UI.Stop()
+	}
 	s.Stopped = true
 	entries := append([]model.CapturedRequest(nil), s.Entries...)
 	r.mu.Unlock()
@@ -615,6 +632,9 @@ func (r *Recorder) Delete(id string) error {
 	}
 	if s.Cap != nil {
 		s.Cap.Stop()
+	}
+	if s.UI != nil {
+		s.UI.Stop()
 	}
 	if s.Page != nil {
 		s.Page.Close(context.Background())
@@ -654,6 +674,7 @@ func (r *Recorder) List() []CaptureInfo {
 		out = append(out, CaptureInfo{
 			ID: s.ID, Source: s.Source, PageURL: s.PageURL, StartedAt: s.StartedAt,
 			Count: count, Stopped: s.Stopped, Note: s.Note, UserAgent: s.UserAgent, Types: s.Types,
+			ActionCount: len(s.Actions),
 		})
 	}
 	return out

@@ -310,6 +310,10 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | DELETE | `/api/collect/captures/{id}/requests` | 删除接口：`{"ids":[…]}` 或 `?ids=a,b` 或 `?all=1` → `{deleted, total, message}` |
 | POST | `/api/collect/captures/{id}/documents` | 补一条页面文档：`{url, method, status, note, body, actions?}`（`body` 为页面 HTML/JSON，≤256KB）→ `{ok, item, total, logs[]}`；补录条目带 `manual:true`。给了 `actions` 时必须是内置浏览器会话：先打开 `url` 执行动作，再补录执行后的那一页 |
 | POST | `/api/collect/captures/{id}/open` | 在内置浏览器录制标签页里打开页面（可带前置动作）并补录页面文档：`{url, actions?}` → `{ok, item, total, logs[]}`；插件会话没有标签页，返回 400 |
+| GET | `/api/collect/captures/{id}/actions` | 这次录制顺带记下的 UI 操作（点击/输入/下拉/勾选/按键/跳转）→ `{items[], count}`；密码条目的 `value` 永远为空、`masked=true` |
+| POST | `/api/collect/captures/{id}/actions` | 插件镜像 / 手工补录 UI 操作：`{items:[UiAction]}`（同 id 是更新，删过的不复活）→ `{added, count}` |
+| DELETE | `/api/collect/captures/{id}/actions` | 删除 UI 操作：`{"ids":[…]}` 或 `?ids=a,b` 或 `?all=1`（清空但保留会话）→ `{deleted, count, message}` |
+| POST | `/api/collect/captures/{id}/recording` | 把会话里的 UI 操作一键转成 UI 回放流程：`{name?, start_url?, ids?, append_to?}` → `{ok, recording_id, name, step_count, start_url, url, hint}`（密码转 `{{password}}`） |
 | POST | `/api/collect/captures/{id}/stop` | 停止录制 → `{count, items[]}` |
 | POST | `/api/collect/captures/{id}/analyze` | 分析某条请求：`{request_id}` → `{records_path, records, fields[], columns[], rows[], pagination, pagination_text}` |
 | DELETE | `/api/collect/captures/{id}` | 关闭标签页并丢弃这次录制结果 |

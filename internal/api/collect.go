@@ -302,15 +302,16 @@ func (s *Server) getCapture(w http.ResponseWriter, r *http.Request) {
 	meta := map[string]any{}
 	if sess != nil {
 		meta = map[string]any{
-			"id":         sess.ID,
-			"source":     sess.Source,
-			"page_url":   sess.PageURL,
-			"started_at": sess.StartedAt,
-			"stopped":    sess.Stopped,
-			"note":       sess.Note,
-			"user_agent": sess.UserAgent,
-			"types":      sess.Types,
-			"skipped":    s.Collect.Recorder.SkippedTypes(id),
+			"id":           sess.ID,
+			"source":       sess.Source,
+			"page_url":     sess.PageURL,
+			"started_at":   sess.StartedAt,
+			"stopped":      sess.Stopped,
+			"note":         sess.Note,
+			"user_agent":   sess.UserAgent,
+			"types":        sess.Types,
+			"action_count": s.Collect.Recorder.UIActionCount(id),
+			"skipped":      s.Collect.Recorder.SkippedTypes(id),
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

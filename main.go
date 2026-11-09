@@ -1,4 +1,4 @@
-// uitest-server：浏览器 UI 自动化测试平台的 Go 服务端。
+// uitest-server：定时接口采集 + UI 操作回放平台的 Go 服务端。
 //
 //   - 内置浏览器：以独立用户目录启动 Edge/Chrome，通过 CDP 驱动；
 //   - 录制：浏览器插件把操作步骤（含稳定 data-uitest-id 定位）上报到这里；

@@ -390,7 +390,7 @@ func generateByRules(fields []model.AIField, instruction string) Result {
 				why = "下拉字段：未采集到候选项，执行时按选项文本模糊匹配"
 			}
 		case "textarea":
-			val = fmt.Sprintf("自动化测试数据（%s）：本记录由 UI 自动化测试平台生成，用于验证表单交互与保存流程。", stamp)
+			val = fmt.Sprintf("自动化测试数据（%s）：本记录由定时接口采集与 UI 操作回放平台生成，用于验证表单交互与保存流程。", stamp)
 			why = "多行文本，含唯一时间戳便于检索"
 		case "password":
 			val = "Auto@Test" + stamp

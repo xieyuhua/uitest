@@ -1243,7 +1243,7 @@
     var st = { lastLive: null };
 
     root.innerHTML = headHtml('录制接口',
-      '在内置浏览器或你自己的浏览器（插件）里正常操作页面 → 录下真实请求 → 勾选要抓的接口 → 配置采集任务。' +
+      '在内置浏览器或你自己的浏览器（插件）里正常操作页面 → 录下真实请求（顺带录下点击 / 输入等 UI 操作）→ 勾选要抓的接口 → 配置采集任务。' +
       '采集默认单任务串行、带随机间隔抖动、遇到 401/403/429 立即停手，不对目标站点造成压力。',
       '<button class="btn btn--sm" id="cap-refresh">刷新</button>' +
       '<button class="btn btn--sm" data-goto="#/collect/tasks">采集任务 →</button>' +
@@ -1679,7 +1679,7 @@
       var host = root.querySelector('#cap-sessions');
       if (!host) return;
       var live = items.filter(function (c) { return !c.stopped; });
-      var liveKey = live.map(function (c) { return c.id + ':' + (c.count || 0); }).join(',');
+      var liveKey = live.map(function (c) { return c.id + ':' + (c.count || 0) + ':' + (c.action_count || 0); }).join(',');
 
       var summary = root.querySelector('#cap-summary');
       if (summary) {
@@ -1694,7 +1694,8 @@
         st.lastLive = liveKey;
         liveHost.innerHTML = live.map(function (c) {
           return '<div class="cap-banner"><i class="dot dot--blink"></i>' +
-            '<span>正在录制 <b>' + esc(c.page_url || '(空白页)') + '</b>，已录 ' + esc(c.count || 0) + ' 条' +
+            '<span>正在录制 <b>' + esc(c.page_url || '(空白页)') + '</b>，已录 ' + esc(c.count || 0) + ' 条接口' +
+            (c.action_count ? '、' + esc(c.action_count) + ' 步 UI 操作' : '') +
             (c.source === 'extension' ? '（浏览器插件）' : '（内置浏览器）') + '</span>' +
             '<span class="muted">开始于 ' + esc(relTime(c.started_at)) + '</span>' +
             '<span style="margin-left:auto"></span>' +
@@ -1728,7 +1729,8 @@
             '<td>' + (c.source === 'extension' ? '<span class="chip">浏览器插件</span>' : '<span class="chip">内置浏览器</span>') +
             (c.types && c.types.length ? '<div class="cell-sub">' + esc(c.types.join('+')) + '</div>' : '') + '</td>' +
             '<td>' + esc(fmtDateTime(c.started_at)) + '</td>' +
-            '<td class="num">' + esc(c.count || 0) + '</td>' +
+            '<td class="num">' + esc(c.count || 0) +
+              (c.action_count ? '<div class="cell-sub">UI ' + esc(c.action_count) + ' 步</div>' : '') + '</td>' +
             '<td>' + (c.stopped ? '<span class="badge badge--draft"><i class="dot"></i>已停止</span>'
               : '<span class="badge badge--running"><i class="dot dot--blink"></i>录制中</span>') + '</td>' +
             '<td class="actions-cell"><button class="btn btn--sm btn--primary" id="cap-open" data-id="' + esc(c.id) + '">勾选接口 → 建任务</button>' +
@@ -1961,6 +1963,8 @@
         min_status: 0, max_status: 0
       },
       sel: {},
+      uiActions: [],
+      uiModal: null,
       timer: null
     };
 
@@ -1969,6 +1973,8 @@
       '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
       '<button class="btn btn--sm" data-act="add-doc">添加页面文档</button>' +
       '<button class="btn btn--sm" data-act="open-doc">打开页面补录</button>' +
+      '<button class="btn btn--sm" data-act="ui-list">查看 UI 操作 <span id="ui-act-count">0</span></button>' +
+      '<button class="btn btn--sm" data-act="ui-rec" disabled>生成 UI 回放流程</button>' +
       '<button class="btn btn--sm btn--ghost" data-act="stop">停止录制</button>' +
       '<button class="btn btn--sm btn--danger" data-act="del">删除这次录制</button>') +
       '<div class="card"><div class="card-body">' +
@@ -2044,6 +2050,7 @@
       if (meta && meta.page_url) parts.push('页面 ' + esc(meta.page_url));
       if (meta && meta.types && meta.types.length) parts.push('范围 ' + esc(meta.types.join(' + ')));
       if (meta && meta.started_at) parts.push('开始于 ' + esc(fmtDateTime(meta.started_at)));
+      if (meta && meta.action_count) parts.push('UI 操作 ' + esc(meta.action_count) + ' 条（点击 / 输入 / 跳转）');
       parts.push(meta && meta.stopped ? '已停止录制' : '<span style="color:#4f46e5">录制中…</span>');
       if (facets) {
         parts.push('共 ' + facets.total + ' 条，筛选后 ' + facets.kept + ' 条');
@@ -2157,12 +2164,198 @@
           state.data = res;
           paintMeta(res.capture, res.facets);
           paintTable(U().apiItems(res));
+          loadUIActions();
         })
         .catch(function (err) {
           root.querySelector('#cap-table').innerHTML = U().errorCard(err.message || '读取录制结果失败');
         });
     }
 
+    /* ---------------- 接口录制顺带的 UI 操作：查看 / 补充 / 删除 / 生成回放流程 ---------------- */
+
+    var UI_ACTION_KINDS = [
+      ['click', '点击'],
+      ['input', '输入'],
+      ['select', '下拉选择'],
+      ['check', '勾选'],
+      ['uncheck', '取消勾选'],
+      ['key', '按键'],
+      ['navigate', '打开页面']
+    ];
+
+    function uiKindName(k) {
+      for (var i = 0; i < UI_ACTION_KINDS.length; i++) {
+        if (UI_ACTION_KINDS[i][0] === k) return UI_ACTION_KINDS[i][1];
+      }
+      return String(k || '');
+    }
+
+    function uiElementName(a) {
+      return a.label || a.text || a.placeholder || a.name || a.tag || '';
+    }
+
+    function uiValueText(a) {
+      if (a.masked) return '••••••（密码已脱敏）';
+      var v = a.value || '';
+      if (a.action === 'navigate' && !v) v = a.page_url || '';
+      return v;
+    }
+
+    function uiShortPath(u) {
+      var s = String(u || '');
+      var i = s.indexOf('://');
+      if (i >= 0) {
+        var j = s.indexOf('/', i + 3);
+        s = j >= 0 ? s.slice(j) : '/';
+      }
+      return s.length > 56 ? s.slice(0, 56) + '…' : (s || '—');
+    }
+
+    function paintUICount() {
+      var n = (state.uiActions || []).length;
+      var box = root.querySelector('#ui-act-count');
+      if (box) box.textContent = n;
+      var btn = root.querySelector('[data-act="ui-rec"]');
+      if (btn) btn.disabled = n === 0;
+    }
+
+    function loadUIActions() {
+      return api('GET', '/api/collect/captures/' + encodeURIComponent(state.id) + '/actions', undefined, { silent: true })
+        .then(function (res) {
+          state.uiActions = (res && res.items) || [];
+          paintUICount();
+        }).catch(function () { });
+    }
+
+    function makeUIRecording(m) {
+      var n = (state.uiActions || []).length;
+      if (!n) {
+        toast('还没有录到 UI 操作：先在内置浏览器里点点 / 输点东西', 'error');
+        return;
+      }
+      api('POST', '/api/collect/captures/' + encodeURIComponent(state.id) + '/recording', {}).then(function (res) {
+        toast('已生成 UI 回放流程（' + res.step_count + ' 步）', 'success');
+        if (m) m.close();
+        if (res.url) go(res.url);
+      }).catch(function () { });
+    }
+
+    function openUIActions() {
+      var body =
+        '<div class="muted" id="ui-act-hint" style="margin-bottom:10px">加载中…</div>' +
+        '<div id="ui-act-table"></div>' +
+        '<div class="ui-act-add">' +
+          '<div class="ui-act-add-head"><b>手动补充一条操作</b>' +
+          '<span class="muted">录制时没录到的（例如动态菜单 / 第三方控件）可以在这里补</span></div>' +
+          '<div class="ui-act-add-row">' +
+          selectHtml('ui_kind', UI_ACTION_KINDS, 'click') +
+          inputHtml('ui_sel', '', 'placeholder="CSS 选择器：button[type=submit] / [data-testid=login]"') +
+          inputHtml('ui_val', '', 'placeholder="值：输入内容 / 下拉值 / 按键；打开页面时填完整 URL"') +
+          '<button class="btn btn--sm" id="ui_add">添加</button>' +
+          '</div>' +
+        '</div>';
+
+      var m = U().openModal({
+        title: '这次录制顺带录到的 UI 操作',
+        width: 920,
+        body: body,
+        footer: '<button class="btn" data-modal-close>关闭</button>' +
+          '<button class="btn btn--danger" id="ui_clear">清空全部</button>' +
+          '<button class="btn btn--primary" id="ui_make">生成 UI 回放流程</button>'
+      });
+      state.uiModal = m;
+
+      function paint() {
+        var host = m.overlay.querySelector('#ui-act-table');
+        var hint = m.overlay.querySelector('#ui-act-hint');
+        var list = state.uiActions || [];
+        if (!host) return;
+        if (hint) {
+          hint.innerHTML = list.length
+            ? '共 <b>' + list.length + '</b> 条。密码框的值一律脱敏；「生成 UI 回放流程」会转成标准回放步骤，' +
+              '可以在定时采集任务里把它选成「前置登录」——先 UI 登录，再抓接口。'
+            : '还没有录到 UI 操作：回到录制标签页正常点击 / 输入 / 切换菜单，这里会自动涨。也可以直接在下面手动补一条。';
+        }
+        if (!list.length) {
+          host.innerHTML = '<div class="muted" style="padding:10px 0">暂无 UI 操作</div>';
+          return;
+        }
+        host.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr>' +
+          '<th style="width:44px">#</th><th style="width:76px">动作</th><th>元素</th>' +
+          '<th style="width:190px">值</th><th style="width:150px">页面</th><th style="width:56px">操作</th>' +
+          '</tr></thead><tbody>' +
+          list.map(function (a) {
+            var name = uiElementName(a);
+            return '<tr>' +
+              '<td class="muted">' + esc(a.index) + '</td>' +
+              '<td>' + esc(uiKindName(a.action)) + '</td>' +
+              '<td><div title="' + esc(a.selector || '') + '">' + esc(name || '—') +
+                (a.selector ? '<div class="muted" style="font-size:12px">' + esc(a.selector) + '</div>' : '') +
+              '</div></td>' +
+              '<td class="muted">' + esc(uiValueText(a)) + '</td>' +
+              '<td class="muted">' + esc(uiShortPath(a.page_url)) + '</td>' +
+              '<td><button class="link-btn" style="color:var(--red)" data-ui-del="' + esc(a.id) + '">删除</button></td>' +
+              '</tr>';
+          }).join('') + '</tbody></table></div>';
+      }
+
+      function reload() {
+        loadUIActions().then(function () {
+          if (document.body.contains(m.overlay)) paint();
+        });
+      }
+
+      paint();
+      reload();
+
+      m.overlay.addEventListener('click', function (e) {
+        var t = e.target;
+        if (!t || !t.closest) return;
+        var del = t.closest('[data-ui-del]');
+        if (del) {
+          var oneId = del.getAttribute('data-ui-del');
+          api('DELETE', '/api/collect/captures/' + encodeURIComponent(state.id) + '/actions', { ids: [oneId] })
+            .then(function () { toast('已删除 1 条 UI 操作', 'success'); reload(); })
+            .catch(function () { });
+        }
+      });
+
+      m.overlay.querySelector('#ui_add').addEventListener('click', function () {
+        var kind = val(m.overlay, 'ui_kind') || 'click';
+        var sel = val(m.overlay, 'ui_sel').trim();
+        var v = val(m.overlay, 'ui_val');
+        if (kind !== 'navigate' && !sel) { toast('请填写 CSS 选择器', 'error'); return; }
+        if (kind === 'navigate' && !v.trim()) { toast('「打开页面」要填完整 URL（带 http/https）', 'error'); return; }
+        var meta = (state.data && state.data.capture) || {};
+        api('POST', '/api/collect/captures/' + encodeURIComponent(state.id) + '/actions', {
+          items: [{
+            action: kind, selector: sel, value: v, masked: false,
+            page_url: meta.page_url || '', source: 'manual', at: new Date().toISOString()
+          }]
+        }).then(function () {
+          toast('已添加 1 条 UI 操作', 'success');
+          m.overlay.querySelector('#ui_sel').value = '';
+          m.overlay.querySelector('#ui_val').value = '';
+          reload();
+        }).catch(function () { });
+      });
+
+      m.overlay.querySelector('#ui_clear').addEventListener('click', function () {
+        U().confirmDialog({
+          title: '清空 UI 操作',
+          message: '会删掉这次录制顺带录到的全部 UI 操作（接口请求不受影响）。',
+          confirmText: '清空全部'
+        }).then(function (ok) {
+          if (!ok) return;
+          api('DELETE', '/api/collect/captures/' + encodeURIComponent(state.id) + '/actions?all=1', {})
+            .then(function () { toast('已清空 UI 操作', 'success'); reload(); }).catch(function () { });
+        });
+      });
+
+      m.overlay.querySelector('#ui_make').addEventListener('click', function () {
+        makeUIRecording(m);
+      });
+    }
     /* ---------------- 页面文档：添加 / 打开补录（支持前置动作） ---------------- */
 
     // 前置动作：在内置浏览器里按顺序执行，再抓执行后的页面 HTML。
@@ -2467,6 +2660,8 @@
       if (act === 'row-doc') { openRowDoc(actEl.getAttribute('data-id')); return; }
       if (act === 'next') { openCreateTaskModal(state.id, Object.keys(state.sel), state.data && state.data.capture); return; }
       if (act === 'preview') { showBodyPreview(state.id, actEl.getAttribute('data-id')); return; }
+      if (act === 'ui-list') { openUIActions(); return; }
+      if (act === 'ui-rec') { makeUIRecording(null); return; }
     });
 
     load();

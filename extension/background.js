@@ -521,6 +521,68 @@ function cleanStepPayload(step) {
 }
 
 /**
+ * mirrorStepToCapture：接口录制顺带录 UI 操作。
+ *
+ * 插件模式下「录制接口」和「录制 UI」本来是两条线：这里把刚保存的 UI 步骤
+ * 同步一份到接口录制会话（/api/collect/captures/{id}/actions），
+ * 这样结果页能同时看到接口 + UI 操作，也能一键生成回放流程 / 当前置登录。
+ * 任何失败都忽略：镜像绝不能影响正常录制。
+ */
+async function mirrorStepToCapture(state, step, stepId) {
+  if (!state || !state.captureId || !step || !step.action) return;
+  try {
+    const action = String(step.action || '').toLowerCase();
+    if (['click', 'input', 'select', 'check', 'uncheck', 'key', 'navigate'].indexOf(action) < 0) return;
+    const loc = step.locator || {};
+    const tgt = step.target || {};
+    const strategy = String(loc.strategy || '');
+    const locValue = String(loc.value || '');
+    let selector = '';
+    if (action !== 'navigate' && locValue) {
+      if (strategy === 'css' || strategy === 'xpath') selector = strategy === 'css' ? locValue : '';
+      else if (strategy === 'id') selector = '#' + locValue;
+      else if (strategy === 'uid') selector = '[data-uitest-id="' + locValue.replace(/"/g, '\\"') + '"]';
+      else if (strategy === 'name') selector = '[name="' + locValue.replace(/"/g, '\\"') + '"]';
+    }
+    let fallback = '';
+    const fbs = loc.fallbacks || [];
+    for (let i = 0; i < fbs.length; i++) {
+      const st = String(fbs[i].strategy || '');
+      if (st === 'text' || st === 'label' || st === 'placeholder') {
+        fallback = st + '=' + String(fbs[i].value || '');
+        break;
+      }
+    }
+    const value = step.value === undefined || step.value === null ? '' : String(step.value);
+    const item = {
+      id: 'ua_ext_' + String(stepId || ''),
+      action: action,
+      selector: selector,
+      fallback: fallback,
+      stable_id: String(tgt.stable_id || ''),
+      tag: String(tgt.tag || ''),
+      type: String(tgt.type || ''),
+      name: String(tgt.name || ''),
+      label: String(tgt.label || ''),
+      text: String(tgt.text || ''),
+      placeholder: String(tgt.placeholder || ''),
+      value: value,
+      masked: false,
+      page_url: String(tgt.page || ''),
+      source: 'extension',
+      at: new Date().toISOString()
+    };
+    if (action === 'navigate' && !item.value) item.value = item.page_url;
+    if (tgt.type === 'password' || value === '{{password}}') {
+      item.masked = true;
+      item.value = '';
+    }
+    await api('/api/collect/captures/' + encodeURIComponent(state.captureId) + '/actions', 'POST', { items: [item] });
+  } catch (e) {
+    /* 忽略：UI 镜像失败不影响接口录制 */
+  }
+}
+/**
  * step：写入一个步骤。
  * 连续输入同一个输入框（同一 uid）时合并到上一步，避免一个字段产生几十条步骤。
  */
@@ -547,6 +609,7 @@ async function handleStep(msg) {
     if (step.note !== undefined) body.note = String(step.note || '');
     if (step.data_key) body.data_key = String(step.data_key);
     const saved = await api(base + '/steps/' + encodeURIComponent(state.lastStepId), 'PATCH', body);
+    try { await mirrorStepToCapture(state, step, state.lastStepId); } catch (e) { /* 镜像失败不影响录制 */ }
     state.lastStepAnnotation = String(body.annotation || state.lastStepAnnotation || '');
     await saveState(state, state.tabId);
     await saveInternal({
@@ -559,6 +622,7 @@ async function handleStep(msg) {
 
   const payload = cleanStepPayload(step);
   const saved = await api(base + '/steps', 'POST', payload);
+  try { await mirrorStepToCapture(state, step, (saved && saved.id) || ''); } catch (e) { /* 镜像失败不影响录制 */ }
   state.stepCount = (state.stepCount || 0) + 1;
   state.lastStepId = (saved && saved.id) || '';
   state.lastStepAnnotation = payload.annotation;
