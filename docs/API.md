@@ -308,14 +308,46 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 | GET | `/api/collect/captures/{id}` | 录制结果 + 筛选：`q / method / type / kind / min_status / max_status / with_body=1 / json=1 / include / exclude / host` → `{capture, items[], facets}` |
 | POST | `/api/collect/captures/{id}/requests` | 插件上报：`{items:[CapturedRequest]}`（同 id 幂等，已删除的不会加回）→ `{added, total}` |
 | DELETE | `/api/collect/captures/{id}/requests` | 删除接口：`{"ids":[…]}` 或 `?ids=a,b` 或 `?all=1` → `{deleted, total, message}` |
-| POST | `/api/collect/captures/{id}/documents` | 手动补一条页面文档：`{url, method, status, note, body}`（`body` 为页面 HTML/JSON，≤256KB）→ `{ok, item, total}`；补录条目带 `manual:true` |
-| POST | `/api/collect/captures/{id}/open` | 在内置浏览器录制标签页里打开页面并补录页面文档：`{url}` → `{ok, item, total}`；插件会话没有标签页，返回 400 |
+| POST | `/api/collect/captures/{id}/documents` | 补一条页面文档：`{url, method, status, note, body, actions?}`（`body` 为页面 HTML/JSON，≤256KB）→ `{ok, item, total, logs[]}`；补录条目带 `manual:true`。给了 `actions` 时必须是内置浏览器会话：先打开 `url` 执行动作，再补录执行后的那一页 |
+| POST | `/api/collect/captures/{id}/open` | 在内置浏览器录制标签页里打开页面（可带前置动作）并补录页面文档：`{url, actions?}` → `{ok, item, total, logs[]}`；插件会话没有标签页，返回 400 |
 | POST | `/api/collect/captures/{id}/stop` | 停止录制 → `{count, items[]}` |
 | POST | `/api/collect/captures/{id}/analyze` | 分析某条请求：`{request_id}` → `{records_path, records, fields[], columns[], rows[], pagination, pagination_text}` |
 | DELETE | `/api/collect/captures/{id}` | 关闭标签页并丢弃这次录制结果 |
 | POST | `/api/collect/analyze` | 直接分析一段响应体：`{body, records_path}` |
 | POST | `/api/collect/common/suggest` | 建任务弹窗用（不绑定任务）：从录制结果汇总公共参数，`{capture_id, request_ids[]}` → `{common, notes[], matched, source}`，见下方示例 |
 | POST | `/api/collect/common/import` | 建任务弹窗用：解析粘贴的 Cookie / Header / 参数 / cURL，`{cookie, headers, params, curl}` → `{common, notes[]}` |
+
+**页面文档补录的前置动作（`actions[]`）**
+
+`/documents`（带 actions）与 `/open` 都支持，按键顺序执行，日志里密码类字段自动打码：
+
+| action | 说明 | 字段 |
+|---|---|---|
+| `type` | 在元素里输入内容（原生 setter + input/change，兼容 React/Vue） | `selector`, `value` |
+| `click` | 点击元素 | `selector` |
+| `select` | 设置下拉框的值 | `selector`, `value` |
+| `press` | 按键（默认 Enter） | `selector?`, `value` |
+| `wait` | 等待毫秒（默认 1000，上限 60000） | `wait_ms` |
+| `wait_for` | 等元素出现（默认 8000ms 超时） | `selector`, `timeout_ms` |
+| `scroll` | 滚动到页面底部 | — |
+| `open` | 再打开一个地址 | `value` |
+
+示例（登录后补录列表页）：
+
+```json
+POST /api/collect/captures/cap_x/open
+{
+  "url": "https://merchant.example.com/#/login",
+  "actions": [
+    {"action": "type", "selector": "input[name=user]", "value": "admin"},
+    {"action": "type", "selector": "input[name=pass]", "value": "123456"},
+    {"action": "click", "selector": "#login-btn"},
+    {"action": "wait_for", "selector": "table", "timeout_ms": 8000}
+  ]
+}
+```
+
+返回里的 `item.url` / `item.path` 是动作执行完之后浏览器里的真实地址（例如 `/#/vip_member`，**hash 路由的 `#fragment` 会原样保留**），`logs[]` 是每一步的中文说明，前端直接展示。
 
 **任务**
 

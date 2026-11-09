@@ -120,11 +120,17 @@ type addDocumentReq struct {
 	Note   string `json:"note"`
 	// Body 页面 HTML / JSON 快照（可选，最多 256KB）
 	Body string `json:"body"`
+	// Actions 可选的前置动作：填了就先在内置浏览器里打开 url、依次执行动作，再补录页面。
+	// 典型用法：打开登录页 → 输入账号 → 输入密码 → 点击登录 → 等列表出现 → 补录登录后的页面。
+	Actions []collect.DocumentAction `json:"actions"`
 }
 
 // addCaptureDocument POST /api/collect/captures/{id}/documents
-// 往录制结果里手动补一条「页面文档（Document）」：插件录不到页面 HTML、
-// 或者内置浏览器没抓到初始页面（缓存 / 前端路由 / 先录制后打开）时，用它补齐。
+//
+// 往录制结果里补一条「页面文档（Document）」，有两种用法：
+//   - 只给 url / method / status / note / body：直接手动补录一条，插件会话也能用；
+//   - 给 actions：必须是有内置浏览器的会话，先打开页面、执行输入/点击等前置动作，
+//     再补录动作执行完之后的那一页（比如登录后的列表页）。
 func (s *Server) addCaptureDocument(w http.ResponseWriter, r *http.Request) {
 	var req addDocumentReq
 	if err := readJSON(r, &req); err != nil {
@@ -132,10 +138,37 @@ func (s *Server) addCaptureDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if _, ok := s.Collect.Recorder.Get(id); !ok {
+	sess, ok := s.Collect.Recorder.Get(id)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "录制会话不存在或已被清理（服务重启后会清空）")
 		return
 	}
+
+	// 带前置动作：必须是内置浏览器会话，先执行动作，再补录执行后的页面
+	if len(req.Actions) > 0 {
+		if sess.Source != "browser" || sess.Page == nil {
+			writeErr(w, http.StatusBadRequest, "这个会话是浏览器插件录制的，没有内置浏览器，不能执行输入/点击等前置动作；请去掉动作只手动补一条页面文档，或改用「内置浏览器」录制")
+			return
+		}
+		if strings.TrimSpace(req.URL) == "" {
+			writeErr(w, http.StatusBadRequest, "带前置动作时必须填写页面地址（url），动作在这个页面上执行")
+			return
+		}
+		ctx, cancel := timeoutCtx(r, 120*time.Second)
+		defer cancel()
+		item, logs, err := s.Collect.Recorder.OpenPageWithActions(ctx, id, req.URL, req.Actions)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		total := 0
+		if entries, ok2, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok2 {
+			total = len(entries)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total, "logs": logs})
+		return
+	}
+
 	item, err := s.Collect.Recorder.AddDocument(id, collect.DocumentInput{
 		URL: req.URL, Method: req.Method, Status: req.Status, Note: req.Note, Body: req.Body,
 	})
@@ -144,18 +177,24 @@ func (s *Server) addCaptureDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total := 0
-	if entries, ok, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok {
+	if entries, ok2, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok2 {
 		total = len(entries)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "item": item, "total": total,
+		"logs": []string{"已添加页面文档：" + item.URL},
+	})
 }
 
 type openPageReq struct {
 	URL string `json:"url"`
+	// Actions 登录 / 跳转页面之类的前置动作（输入、点击、等待…），可为空。
+	Actions []collect.DocumentAction `json:"actions"`
 }
 
 // openCapturePage POST /api/collect/captures/{id}/open
-// 在内置浏览器的录制标签页里打开一个页面，并把它的页面文档补录进录制结果。
+//
+// 在内置浏览器的录制标签页里打开一个页面，(可选)执行一串前置动作，再把页面文档补录进结果。
 // 插件会话没有内置标签页，返回 400 并提示改用「添加页面文档」。
 func (s *Server) openCapturePage(w http.ResponseWriter, r *http.Request) {
 	var req openPageReq
@@ -168,22 +207,27 @@ func (s *Server) openCapturePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if _, ok := s.Collect.Recorder.Get(id); !ok {
+	sess, ok := s.Collect.Recorder.Get(id)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "录制会话不存在或已被清理（服务重启后会清空）")
 		return
 	}
-	ctx, cancel := timeoutCtx(r, 90*time.Second)
+	if sess.Source != "browser" || sess.Page == nil {
+		writeErr(w, http.StatusBadRequest, "这个会话是浏览器插件录制的，没有内置浏览器标签页；请用「手动添加页面文档」补录")
+		return
+	}
+	ctx, cancel := timeoutCtx(r, 120*time.Second)
 	defer cancel()
-	item, err := s.Collect.Recorder.OpenPage(ctx, id, req.URL)
+	item, logs, err := s.Collect.Recorder.OpenPageWithActions(ctx, id, req.URL, req.Actions)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	total := 0
-	if entries, ok, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok {
+	if entries, ok2, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok2 {
 		total = len(entries)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total, "logs": logs})
 }
 
 type deleteRequestsReq struct {

@@ -303,6 +303,10 @@ func (r *Recorder) ingest(id string, items []model.CapturedRequest, manual bool)
 		}
 		if u, err := url.Parse(it.URL); err == nil {
 			it.Host, it.Path, it.Query = u.Host, u.Path, u.RawQuery
+			// hash 路由（/#/vip_member）的 fragment 也算路径的一部分，漏掉就全显示成 "/"
+			if u.Fragment != "" {
+				it.Path += "#" + u.Fragment
+			}
 		}
 		if it.Type == "" {
 			it.Type = "XHR"
