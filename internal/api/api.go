@@ -98,6 +98,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collect/captures/{id}/stop", s.stopCapture)
 	mux.HandleFunc("POST /api/collect/captures/{id}/requests", s.addCaptureRequests)
 	mux.HandleFunc("DELETE /api/collect/captures/{id}/requests", s.deleteCaptureRequests)
+	mux.HandleFunc("POST /api/collect/captures/{id}/documents", s.addCaptureDocument)
+	mux.HandleFunc("POST /api/collect/captures/{id}/open", s.openCapturePage)
 	mux.HandleFunc("POST /api/collect/captures/{id}/analyze", s.analyzeCapture)
 	mux.HandleFunc("DELETE /api/collect/captures/{id}", s.deleteCapture)
 	mux.HandleFunc("DELETE /api/collect/captures", s.clearCaptures)

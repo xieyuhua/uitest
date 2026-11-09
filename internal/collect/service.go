@@ -48,6 +48,10 @@ type CaptureSession struct {
 	Entries []model.CapturedRequest
 	// Deleted 被用户删掉的请求 id（内置浏览器会话没法从 CDP 里删，只能在这里屏蔽）
 	Deleted map[string]bool
+	// Manual 手动补充 / 自动补录的条目：内置浏览器会话也可能没有新的 Document 请求
+	// （SPA 前端路由、先录制后打开页面、页面走缓存），所以补录的条目单独存，
+	// 读取时并到实时结果后面，停止录制也不会被 Cap 快照冲掉。
+	Manual []model.CapturedRequest
 	// LastAt 最近一次收到数据的时间（插件会话长时间没动静就自动判为"已停止"，避免僵尸会话）
 	LastAt time.Time
 	// Types 这次录制要抓的资源类型（XHR / Fetch / Document …），列表和详情都会回显，便于确认设置生效
@@ -145,8 +149,17 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 	if startURL != "" {
 		go func() {
 			navCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
 			_ = page.Navigate(navCtx, startURL)
+			cancel()
+			// 选了「含页面文档」但 CDP 没抓到（走缓存 / 前端路由 / 重定向）时，
+			// 用页面当前 DOM 兜底补一条，保证录制结果里一定有页面文档。
+			if hasType(types, "Document") {
+				docCtx, docCancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer docCancel()
+				if _, derr := r.ensureDocument(docCtx, sess.ID, startURL, "初始页面文档（自动补录）"); derr != nil {
+					log.Printf("[collect] 自动补录页面文档失败 %s：%v", sess.ID, derr)
+				}
+			}
 		}()
 	}
 
@@ -177,7 +190,23 @@ func (r *Recorder) Start(ctx context.Context, startURL string, types []string, c
 
 // StartExternal 登记一个"插件录制"会话。不打开浏览器、不占标签页，
 // 由浏览器插件把录到的请求 POST 上来（POST /api/collect/captures/{id}/requests）。
-func (r *Recorder) StartExternal(pageURL, note, userAgent string) (CaptureInfo, error) {
+//
+// types 由插件按「录制范围」带上来：插件能拿到 XHR / Fetch，页面文档由 content script
+// 读 document.documentElement.outerHTML 上报（type=Document）；其他资源类型插件拿不到。
+func (r *Recorder) StartExternal(pageURL, note, userAgent string, types []string) (CaptureInfo, error) {
+	if len(types) == 0 {
+		types = []string{"XHR", "Fetch", "Document"}
+	}
+	keep := make([]string, 0, len(types))
+	for _, t := range normalizeTypes(types) {
+		switch t {
+		case "XHR", "Fetch", "Document":
+			keep = append(keep, t)
+		}
+	}
+	if len(keep) == 0 {
+		keep = []string{"XHR", "Fetch", "Document"}
+	}
 	sess := &CaptureSession{
 		ID:        newID("cap_"),
 		Source:    "extension",
@@ -188,8 +217,7 @@ func (r *Recorder) StartExternal(pageURL, note, userAgent string) (CaptureInfo, 
 		UserAgent: userAgent,
 		Entries:   []model.CapturedRequest{},
 		Deleted:   map[string]bool{},
-		// 插件只会上报接口请求（XHR/Fetch），不会有页面文档
-		Types: []string{"XHR", "Fetch"},
+		Types:     keep,
 	}
 
 	r.mu.Lock()
@@ -211,28 +239,50 @@ func (r *Recorder) StartExternal(pageURL, note, userAgent string) (CaptureInfo, 
 	}
 	info := CaptureInfo{
 		ID: sess.ID, Source: sess.Source, PageURL: sess.PageURL,
-		StartedAt: sess.StartedAt, Note: sess.Note, UserAgent: sess.UserAgent,
+		StartedAt: sess.StartedAt, Note: sess.Note, UserAgent: sess.UserAgent, Types: sess.Types,
 	}
 	r.mu.Unlock()
 	return info, nil
 }
 
 // AddRequests 由插件把录到的请求写入会话（批量，幂等：同 id 不会重复写入）。
+//
+// 内置浏览器会话也接收：手动「添加页面文档 / 打开页面补录」走的也是这条路。
 func (r *Recorder) AddRequests(id string, items []model.CapturedRequest) (int, error) {
+	added, err := r.ingest(id, items, false)
+	return len(added), err
+}
+
+// ingest 把条目写进会话，返回真正写入的那些（同 id / 已删除的会跳过）。
+//
+// manual=true 表示不是页面钩子上报的，而是用户手动补录或录制器自动补录：
+// 这类条目标 manual 标记，并且不会把「已停止」的会话重新变成录制中。
+func (r *Recorder) ingest(id string, items []model.CapturedRequest, manual bool) ([]model.CapturedRequest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
 	if !ok {
-		return 0, fmt.Errorf("录制会话不存在或已被清理（服务重启后会新建）")
+		return nil, fmt.Errorf("录制会话不存在或已被清理（服务重启后会新建）")
 	}
+	live := s.Entries
 	if s.Cap != nil {
-		return 0, fmt.Errorf("这是内置浏览器录制的会话，不接收外部上报")
+		live = s.Cap.Snapshot()
 	}
-	seen := make(map[string]bool, len(s.Entries))
-	for _, it := range s.Entries {
+	seen := make(map[string]bool, len(live)+len(s.Manual))
+	next := 1
+	for _, it := range live {
 		seen[it.ID] = true
+		if it.Index >= next {
+			next = it.Index + 1
+		}
 	}
-	added := 0
+	for _, it := range s.Manual {
+		seen[it.ID] = true
+		if it.Index >= next {
+			next = it.Index + 1
+		}
+	}
+	added := make([]model.CapturedRequest, 0, len(items))
 	for _, it := range items {
 		it.URL = strings.TrimSpace(it.URL)
 		if it.URL == "" || !strings.HasPrefix(strings.ToLower(it.URL), "http") {
@@ -244,7 +294,7 @@ func (r *Recorder) AddRequests(id string, items []model.CapturedRequest) (int, e
 		if seen[it.ID] || s.Deleted[it.ID] {
 			continue // 幂等 + 尊重用户已删除的条目
 		}
-		if len(s.Entries) >= maxCaptureEntries {
+		if len(live)+len(s.Manual)+len(added) >= maxCaptureEntries {
 			break
 		}
 		it.Method = strings.ToUpper(strings.TrimSpace(it.Method))
@@ -276,14 +326,24 @@ func (r *Recorder) AddRequests(id string, items []model.CapturedRequest) (int, e
 				it.BodySize = len(it.BodyPreview)
 			}
 		}
-		it.Index = len(s.Entries) + 1
+		it.Index = next
+		next++
+		if manual || s.Cap != nil {
+			it.Manual = true
+		}
 		seen[it.ID] = true
-		s.Entries = append(s.Entries, it)
-		added++
+		if s.Cap != nil {
+			s.Manual = append(s.Manual, it)
+		} else {
+			s.Entries = append(s.Entries, it)
+		}
+		added = append(added, it)
 	}
-	if added > 0 {
-		s.Stopped = false
+	if len(added) > 0 {
 		s.LastAt = time.Now()
+		if s.Source == "extension" && !manual {
+			s.Stopped = false
+		}
 	}
 	return added, nil
 }
@@ -319,6 +379,9 @@ func (r *Recorder) DeleteRequests(id string, ids []string) (int, error) {
 	for _, it := range s.Entries {
 		exist[it.ID] = true
 	}
+	for _, it := range s.Manual {
+		exist[it.ID] = true
+	}
 
 	deleted := 0
 	for rid := range want {
@@ -328,7 +391,17 @@ func (r *Recorder) DeleteRequests(id string, ids []string) (int, error) {
 		s.Deleted[rid] = true
 		deleted++
 	}
-	// 插件会话的数据就在 Entries 里，直接摘掉；内置浏览器会话靠 Deleted 过滤
+	// 手动补录的条目直接摘掉；插件会话的数据就在 Entries 里，也直接摘掉；
+	// 内置浏览器实时抓到的条目没法从 CDP 里删，只能靠 Deleted 过滤。
+	if len(s.Manual) > 0 {
+		out := s.Manual[:0]
+		for _, it := range s.Manual {
+			if !s.Deleted[it.ID] {
+				out = append(out, it)
+			}
+		}
+		s.Manual = out
+	}
 	if s.Cap == nil {
 		out := s.Entries[:0]
 		for _, it := range s.Entries {
@@ -385,23 +458,44 @@ func (r *Recorder) Entries(id string) ([]model.CapturedRequest, bool, error) {
 	if !ok {
 		return nil, false, fmt.Errorf("录制会话不存在或已被清理（服务重启后会清空）")
 	}
-	var list []model.CapturedRequest
+	return s.visibleEntries(), true, nil
+}
+
+// visibleEntries 合并「实时抓到的」+「手动补充 / 自动补录的」条目，并过滤已删除的。
+func (s *CaptureSession) visibleEntries() []model.CapturedRequest {
+	var live []model.CapturedRequest
 	if s.Cap != nil {
-		list = s.Cap.Snapshot()
+		live = s.Cap.Snapshot()
 	}
-	if len(list) == 0 {
-		list = append([]model.CapturedRequest(nil), s.Entries...)
+	if len(live) == 0 {
+		live = s.Entries
 	}
-	if len(s.Deleted) > 0 {
-		out := make([]model.CapturedRequest, 0, len(list))
-		for _, it := range list {
-			if !s.Deleted[it.ID] {
-				out = append(out, it)
+	return mergeCaptured(live, s.Manual, s.Deleted)
+}
+
+// mergeCaptured 按 id 去重合并两组条目；deleted 里的直接丢掉。
+func mergeCaptured(live, manual []model.CapturedRequest, deleted map[string]bool) []model.CapturedRequest {
+	if len(manual) == 0 && len(deleted) == 0 {
+		return live
+	}
+	out := make([]model.CapturedRequest, 0, len(live)+len(manual))
+	seen := make(map[string]bool, len(live)+len(manual))
+	add := func(it model.CapturedRequest) {
+		if it.ID != "" {
+			if seen[it.ID] || deleted[it.ID] {
+				return
 			}
+			seen[it.ID] = true
 		}
-		list = out
+		out = append(out, it)
 	}
-	return list, true, nil
+	for _, it := range live {
+		add(it)
+	}
+	for _, it := range manual {
+		add(it)
+	}
+	return out
 }
 
 // Stop 停止录制并返回结果（幂等）。
@@ -481,30 +575,8 @@ func (r *Recorder) List() []CaptureInfo {
 			time.Since(s.LastAt) > 30*time.Minute {
 			s.Stopped = true
 		}
-		count := len(s.Entries)
-		if s.Cap != nil {
-			if live := s.Cap.Count(); live > 0 || !s.Stopped {
-				count = live
-			}
-		}
-		if len(s.Deleted) > 0 {
-			// 列表里的条数也要反映"删掉之后"的数量
-			visible := 0
-			if s.Cap != nil {
-				for _, it := range s.Cap.Snapshot() {
-					if !s.Deleted[it.ID] {
-						visible++
-					}
-				}
-			} else {
-				for _, it := range s.Entries {
-					if !s.Deleted[it.ID] {
-						visible++
-					}
-				}
-			}
-			count = visible
-		}
+		// 条数按"合并 + 过滤已删除"后的结果算：手动补录的页面文档也算一条
+		count := len(s.visibleEntries())
 		out = append(out, CaptureInfo{
 			ID: s.ID, Source: s.Source, PageURL: s.PageURL, StartedAt: s.StartedAt,
 			Count: count, Stopped: s.Stopped, Note: s.Note, UserAgent: s.UserAgent, Types: s.Types,

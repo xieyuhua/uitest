@@ -268,6 +268,8 @@ function cleanNetItem(raw) {
     body_preview: String(it.body_preview || '').slice(0, 256 * 1024),
     post_data: String(it.post_data || '').slice(0, 64 * 1024),
     error: String(it.error || '').slice(0, 300),
+    // 备注：页面文档用于说明"什么时候、为什么补的"
+    note: String(it.note || '').slice(0, 300),
     at: String(it.at || '')
   };
   const headers = it.req_headers && typeof it.req_headers === 'object' ? it.req_headers : null;
@@ -463,7 +465,9 @@ async function handleStart(msg) {
         source: 'extension',
         start_url: startUrl,
         note: name,
-        user_agent: navigator.userAgent || ''
+        user_agent: navigator.userAgent || '',
+        // 插件侧能力：接口由页面钩子上报，页面文档（Document）由 content script 上报
+        types: ['XHR', 'Fetch', 'Document']
       });
       captureId = (cap && cap.capture && cap.capture.id) || '';
       if (!captureId) netError = '服务端没有返回录制会话 id（接口采集功能是否可用？）';

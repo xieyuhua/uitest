@@ -38,6 +38,9 @@ type startCaptureReq struct {
 //   - 默认（source=browser）：打开内置浏览器标签页，服务端旁路录制；
 //   - source=extension：只登记一个会话，由浏览器插件把请求 POST 上来
 //     （插件在你自己的浏览器里录，登录态/插件/代理都不受影响）。
+//
+// types 两种模式都生效：browser 用它配置 CDP 旁路抓取；extension 用它告诉插件
+// 该录哪些类型（插件支持 XHR / Fetch / Document，页面文档由 content script 上报）。
 func (s *Server) startCapture(w http.ResponseWriter, r *http.Request) {
 	var req startCaptureReq
 	if err := readJSON(r, &req); err != nil {
@@ -50,7 +53,7 @@ func (s *Server) startCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.EqualFold(req.Source, "extension") {
-		info, err := s.Collect.Recorder.StartExternal(url, req.Note, strings.TrimSpace(req.UserAgent))
+		info, err := s.Collect.Recorder.StartExternal(url, req.Note, strings.TrimSpace(req.UserAgent), req.Types)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -108,6 +111,79 @@ func (s *Server) addCaptureRequests(w http.ResponseWriter, r *http.Request) {
 		total = len(entries)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "total": total})
+}
+
+type addDocumentReq struct {
+	URL    string `json:"url"`
+	Method string `json:"method"`
+	Status int    `json:"status"`
+	Note   string `json:"note"`
+	// Body 页面 HTML / JSON 快照（可选，最多 256KB）
+	Body string `json:"body"`
+}
+
+// addCaptureDocument POST /api/collect/captures/{id}/documents
+// 往录制结果里手动补一条「页面文档（Document）」：插件录不到页面 HTML、
+// 或者内置浏览器没抓到初始页面（缓存 / 前端路由 / 先录制后打开）时，用它补齐。
+func (s *Server) addCaptureDocument(w http.ResponseWriter, r *http.Request) {
+	var req addDocumentReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := s.Collect.Recorder.Get(id); !ok {
+		writeErr(w, http.StatusNotFound, "录制会话不存在或已被清理（服务重启后会清空）")
+		return
+	}
+	item, err := s.Collect.Recorder.AddDocument(id, collect.DocumentInput{
+		URL: req.URL, Method: req.Method, Status: req.Status, Note: req.Note, Body: req.Body,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	total := 0
+	if entries, ok, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok {
+		total = len(entries)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total})
+}
+
+type openPageReq struct {
+	URL string `json:"url"`
+}
+
+// openCapturePage POST /api/collect/captures/{id}/open
+// 在内置浏览器的录制标签页里打开一个页面，并把它的页面文档补录进录制结果。
+// 插件会话没有内置标签页，返回 400 并提示改用「添加页面文档」。
+func (s *Server) openCapturePage(w http.ResponseWriter, r *http.Request) {
+	var req openPageReq
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		writeErr(w, http.StatusBadRequest, "请填写要打开的页面地址（url）")
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := s.Collect.Recorder.Get(id); !ok {
+		writeErr(w, http.StatusNotFound, "录制会话不存在或已被清理（服务重启后会清空）")
+		return
+	}
+	ctx, cancel := timeoutCtx(r, 90*time.Second)
+	defer cancel()
+	item, err := s.Collect.Recorder.OpenPage(ctx, id, req.URL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	total := 0
+	if entries, ok, e2 := s.Collect.Recorder.Entries(id); e2 == nil && ok {
+		total = len(entries)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item, "total": total})
 }
 
 type deleteRequestsReq struct {

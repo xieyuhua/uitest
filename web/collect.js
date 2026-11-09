@@ -1967,6 +1967,8 @@
     root.innerHTML = headHtml('录制结果', '勾选要定时抓取的接口；可以先按方法 / 状态 / 关键字 / 正则筛一遍。',
       '<button class="btn btn--sm" data-act="back">返回列表</button>' +
       '<button class="btn btn--sm" data-act="refresh">刷新</button>' +
+      '<button class="btn btn--sm" data-act="add-doc">添加页面文档</button>' +
+      '<button class="btn btn--sm" data-act="open-doc">打开页面补录</button>' +
       '<button class="btn btn--sm btn--ghost" data-act="stop">停止录制</button>' +
       '<button class="btn btn--sm btn--danger" data-act="del">删除这次录制</button>') +
       '<div class="card"><div class="card-body">' +
@@ -2056,6 +2058,21 @@
         }
         if (facets.hosts && facets.hosts.length) parts.push('站点：' + facets.hosts.map(esc).join('、'));
       }
+      // 页面文档（Document）没录到时的诊断：插件只能上报接口，需要手动补
+      var typeMap = (facets && facets.by_type) || {};
+      var hasDoc = false;
+      Object.keys(typeMap).forEach(function (k) {
+        if (String(k).toLowerCase() === 'document') hasDoc = true;
+      });
+      var wantDoc = true;
+      if (meta && meta.types && meta.types.length) {
+        wantDoc = meta.types.some(function (t) { return String(t).toLowerCase() === 'document'; });
+      }
+      if (wantDoc && !hasDoc) {
+        parts.push(meta && meta.source === 'extension'
+          ? '<span class="chip" style="color:#b45309;border-color:#f59e0b">未录到页面文档</span> 插件只能上报接口；点上方「添加页面文档」手动补一条'
+          : '<span class="chip" style="color:#b45309;border-color:#f59e0b">未录到页面文档</span> 点「添加页面文档」或「打开页面补录」补一条');
+      }
       host.innerHTML = parts.join(' · ');
     }
 
@@ -2064,7 +2081,8 @@
       if (!host) return;
       if (!items.length) {
         host.innerHTML = U().emptyCard('没有匹配的请求',
-          '换个关键字或放宽筛选条件；如果还没录到东西，先在内置浏览器（或插件录制时的那个标签页）里点点页面。');
+          '换个关键字或放宽筛选条件；如果还没录到东西，先在内置浏览器（或插件录制时的那个标签页）里点点页面。' +
+          '需要页面文档时，也可以点上方「添加页面文档」手动补一条。');
         syncSelBar();
         return;
       }
@@ -2083,7 +2101,8 @@
             '<td><div class="url-cell" title="' + esc(it.url) + '">' + esc(it.path || it.url) +
             (it.query ? '<span class="muted">?' + esc(it.query.slice(0, 60)) + '</span>' : '') + '</div></td>' +
             '<td>' + statusChip(it.status) + '</td>' +
-            '<td class="muted">' + esc(it.type) + '</td>' +
+            '<td class="muted">' + esc(it.type) +
+            (it.manual ? ' <span class="chip" title="' + esc(it.note || '手动补录 / 自动补录') + '">手动</span>' : '') + '</td>' +
             '<td class="num muted">' + esc(fmtBytes(it.bytes)) + '</td>' +
             '<td class="num muted">' + esc(fmtMS(it.duration_ms)) + '</td>' +
             '<td>' + (it.has_body ? '<button class="link-btn" data-act="preview" data-id="' + esc(it.id) + '">查看</button>' : '<span class="muted">—</span>') +
@@ -2133,6 +2152,78 @@
         .catch(function (err) {
           root.querySelector('#cap-table').innerHTML = U().errorCard(err.message || '读取录制结果失败');
         });
+    }
+
+    // 手动添加一条页面文档（插件录不到 HTML、内置浏览器漏抓时用）
+    function openAddDocModal() {
+      var meta = (state.data && state.data.capture) || {};
+      var body = '<div class="form-grid">' +
+        fld('页面地址', inputHtml('doc_url', meta.page_url || '', 'placeholder="https://example.com/list"')) +
+        fld('方法', selectHtml('doc_method', [['GET', 'GET'], ['POST', 'POST']], 'GET')) +
+        fld('状态码', numHtml('doc_status', 200)) +
+        fld('备注', inputHtml('doc_note', '', 'placeholder="例如：登录后的列表页"')) +
+        '</div>' +
+        fld('页面 HTML / JSON（可选）', textareaHtml('doc_body', '', 8,
+          'placeholder="可以直接粘贴页面源码；留空就只记地址、状态与备注"'));
+      var m = U().openModal({
+        title: '添加页面文档',
+        width: 720,
+        body: body,
+        footer: '<button class="btn" data-modal-close>取消</button>' +
+          '<button class="btn btn--primary" id="doc_save">保存</button>'
+      });
+      var q = function (sel) { var el = m.overlay.querySelector(sel); return el ? el.value : ''; };
+      m.overlay.querySelector('#doc_save').addEventListener('click', function () {
+        var payload = {
+          url: q('#doc_url').trim(),
+          method: q('#doc_method') || 'GET',
+          status: parseInt(q('#doc_status'), 10) || 200,
+          note: q('#doc_note').trim(),
+          body: q('#doc_body')
+        };
+        if (!payload.url) { toast('请填写页面地址', 'error'); return; }
+        api('POST', '/api/collect/captures/' + encodeURIComponent(state.id) + '/documents', payload)
+          .then(function (res) {
+            toast('已添加页面文档' + (res && res.total ? '（共 ' + res.total + ' 条）' : ''), 'success');
+            m.close();
+            load();
+          }).catch(function () { });
+      });
+    }
+
+    // 在内置浏览器里打开页面，并把它的页面文档补录进这次录制
+    function openDocInBrowser() {
+      var meta = (state.data && state.data.capture) || {};
+      if (meta.source && meta.source !== 'browser') {
+        toast('这是插件录制会话，没有内置浏览器标签页；请用「添加页面文档」', 'error', 6000);
+        return;
+      }
+      var m = U().openModal({
+        title: '打开页面并补录页面文档',
+        width: 640,
+        body: fld('页面地址', inputHtml('doc_open_url', meta.page_url || '', 'placeholder="https://example.com/list"')) +
+          '<div class="muted" style="margin-top:8px">会在这个录制会话的内置浏览器标签页里打开该页面，' +
+          '并把页面 HTML 补录进录制结果（不会新建会话）。</div>',
+        footer: '<button class="btn" data-modal-close>取消</button>' +
+          '<button class="btn btn--primary" id="doc_open">打开并补录</button>'
+      });
+      m.overlay.querySelector('#doc_open').addEventListener('click', function () {
+        var u = ((m.overlay.querySelector('#doc_open_url') || {}).value || '').trim();
+        if (!u) { toast('请填写页面地址', 'error'); return; }
+        var btn = m.overlay.querySelector('#doc_open');
+        btn.disabled = true;
+        btn.textContent = '打开中…';
+        api('POST', '/api/collect/captures/' + encodeURIComponent(state.id) + '/open', { url: u })
+          .then(function () {
+            toast('已打开页面并补录页面文档', 'success');
+            m.close();
+            load();
+          }).catch(function (err) {
+            btn.disabled = false;
+            btn.textContent = '打开并补录';
+            if (err && err.message) toast(err.message, 'error', 7000);
+          });
+      });
     }
 
     // ---- 事件 ----
@@ -2213,6 +2304,8 @@
         }).then(function (ok) { if (ok) deleteRows(ids); });
         return;
       }
+      if (act === 'add-doc') { openAddDocModal(); return; }
+      if (act === 'open-doc') { openDocInBrowser(); return; }
       if (act === 'next') { openCreateTaskModal(state.id, Object.keys(state.sel), state.data && state.data.capture); return; }
       if (act === 'preview') { showBodyPreview(state.id, actEl.getAttribute('data-id')); return; }
     });

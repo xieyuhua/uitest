@@ -111,6 +111,8 @@ extension/
 2. 把 `net-hook.js` 注入**页面主世界**（`chrome.scripting.executeScript({world:'MAIN'})`），
    由它包一层 `fetch` / `XMLHttpRequest`，记录方法、URL、状态、请求头、请求体、
    响应体（文本/JSON，截断 256KB）；
+   同时 content script 会以 `type:"Document"` 上报**页面文档**（`document.documentElement.outerHTML`，
+   开始录制时一次 + 页面地址变化时一次，≤256KB），所以录制范围里的「含页面文档」在插件方式下也有效；
 3. 钩子通过 `window.postMessage` 交给 content script，再由 background **攒批上报**
    （每 500ms 或满 20 条，`POST /api/collect/captures/{id}/requests`）；
 4. 停止时把剩余缓冲发完并 `POST …/stop`；
@@ -123,7 +125,7 @@ extension/
 | 项 | 说明 |
 |---|---|
 | 录的是什么 | **你自己浏览器里真实发出的**请求，登录态、插件、代理、抓包工具都不受影响 |
-| 抓不到 | 二进制响应（图片/文件）、`EventSource`/`WebSocket` 流数据 |
+| 抓不到 | 二进制响应（图片/文件）、`EventSource`/`WebSocket` 流数据、页面渲染后才生成的 DOM（只上报完整 HTML 文本） |
 | 什么时候抓不到 | 页面在装插件之前就打开了（刷新一次）；`chrome://`、扩展商店、PDF 无法注入 |
 | 平台自己的请求 | 自动跳过 `服务端地址/api/` 与 `chrome-extension://` |
 | 隐私 | 请求头/请求体/响应体原样上报到**你自己的**服务端，敏感接口请自行评估 |

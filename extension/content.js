@@ -55,6 +55,8 @@
   var listenersBound = false;
   var NET_SOURCE = 'uitest-nethook';   // 页面侧钩子 -> content 的消息标记
   var NET_CTL = 'uitest-netctl';       // content -> 页面侧钩子的开关标记
+  var lastDocUrl = '';                 // 上次上报页面文档的地址（去重）
+  var lastDocAt = 0;                   // 上次上报页面文档的时间戳（防抖）
 
   /* ---------------- 通用小工具 ---------------- */
 
@@ -127,6 +129,12 @@
     if (wantNet !== netOn) {
       netOn = wantNet;
       sendNetControl();
+      // 刚开始录制：把当前页面的 HTML 补一条「页面文档」上报（插件钩子录不到 HTML）
+      if (netOn) reportPageDocument('开始录制时的页面文档');
+    }
+    // 录制中页面地址变了（整页跳转 / SPA 路由）：补报新页面的文档
+    if (wantNet && IS_TOP && location.href !== lastDocUrl) {
+      reportPageDocument('页面变化时的页面文档');
     }
 
     if (recordingHere) {
@@ -158,6 +166,61 @@
         skipPrefixes: netSkipPrefixes()
       }, '*');
     } catch (e) { /* 忽略 */ }
+  }
+
+  /**
+   * 上报「页面文档（Document）」：MV3 插件只能包 fetch / XHR，录不到页面 HTML，
+   * 所以由 content script 取 document.documentElement.outerHTML 上报，类型记 Document。
+   * 只有顶层框架、正在录制本页、接口录制开关打开时才上报。
+   */
+  function reportPageDocument(reason) {
+    if (!IS_TOP || !recordingHere || !netOn || !state.captureId) return;
+    // 页面还没加载完：等 load 之后再取一次完整 HTML，避免只上报半截
+    if (document.readyState !== 'complete') {
+      var once = function () {
+        window.removeEventListener('load', once, true);
+        reportPageDocument(reason);
+      };
+      window.addEventListener('load', once, true);
+      return;
+    }
+    var href = location.href;
+    var now = Date.now();
+    if (href === lastDocUrl && now - lastDocAt < 1500) return; // 状态广播 + load 双触发时去重
+    var html = '';
+    try {
+      html = (document.documentElement && document.documentElement.outerHTML) || '';
+    } catch (e) { html = ''; }
+    if (html.length > 256 * 1024) html = html.slice(0, 256 * 1024);
+    var status = 200;
+    try {
+      var nav = (performance.getEntriesByType ? performance.getEntriesByType('navigation') : [])[0];
+      if (nav && nav.responseStatus) status = nav.responseStatus;
+    } catch (e) { /* 忽略 */ }
+    lastDocUrl = href;
+    lastDocAt = now;
+    localNetCount++;
+    renderOverlay();
+    sendMessage({
+      type: 'net',
+      item: {
+        type: 'Document',
+        method: 'GET',
+        url: href,
+        status: status || 200,
+        mime_type: 'text/html',
+        bytes: html.length,
+        has_body: !!html,
+        body_size: html.length,
+        body_preview: html,
+        page_url: href,
+        at: nowIso(),
+        note: reason || '页面文档'
+      }
+    }, function (resp, err) {
+      if (err) return;
+      if (resp && resp.ok === false) showOverlayError(resp.error || '页面文档上报失败');
+    });
   }
 
   /** 页面钩子抓到的请求：本地计数 + 交给 background 上报 */

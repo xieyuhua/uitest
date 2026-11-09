@@ -53,8 +53,12 @@ type CapturedRequest struct {
 	// PageURL 触发这条请求的页面地址（同时作为默认 Referer）
 	PageURL string `json:"page_url,omitempty"`
 	// Error 请求失败原因（CDP loadingFailed）
-	Error string    `json:"error,omitempty"`
-	At    time.Time `json:"at"`
+	Error string `json:"error,omitempty"`
+	// Manual 手动补充 / 录制器自动补录的条目（不是实时抓到的请求）
+	Manual bool `json:"manual,omitempty"`
+	// Note 备注：为什么补录（手工添加页面文档 / 打开页面补录 / 初始页面文档）
+	Note string    `json:"note,omitempty"`
+	At   time.Time `json:"at"`
 }
 
 // HarvestField 一条字段映射：响应 JSON 里的某个路径 → 数据库里的某一列。

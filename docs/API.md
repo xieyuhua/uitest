@@ -303,11 +303,13 @@ curl -s -X POST http://127.0.0.1:8490/api/recordings \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/collect/captures` | 内置浏览器方式：`{start_url, types:["XHR","Fetch"], capture_bodies, note}`；<br>插件方式：`{source:"extension", start_url, note, user_agent}`（只登记会话，不打开浏览器） |
+| POST | `/api/collect/captures` | 内置浏览器方式：`{start_url, types:["XHR","Fetch","Document"], capture_bodies, note}`；<br>插件方式：`{source:"extension", start_url, note, user_agent, types}`（只登记会话，不打开浏览器；`types` 支持 `XHR`/`Fetch`/`Document`，页面文档由 content script 上报） |
 | GET | `/api/collect/captures` | 会话列表（含实时条数、`source` = `browser`/`extension`） |
 | GET | `/api/collect/captures/{id}` | 录制结果 + 筛选：`q / method / type / kind / min_status / max_status / with_body=1 / json=1 / include / exclude / host` → `{capture, items[], facets}` |
 | POST | `/api/collect/captures/{id}/requests` | 插件上报：`{items:[CapturedRequest]}`（同 id 幂等，已删除的不会加回）→ `{added, total}` |
 | DELETE | `/api/collect/captures/{id}/requests` | 删除接口：`{"ids":[…]}` 或 `?ids=a,b` 或 `?all=1` → `{deleted, total, message}` |
+| POST | `/api/collect/captures/{id}/documents` | 手动补一条页面文档：`{url, method, status, note, body}`（`body` 为页面 HTML/JSON，≤256KB）→ `{ok, item, total}`；补录条目带 `manual:true` |
+| POST | `/api/collect/captures/{id}/open` | 在内置浏览器录制标签页里打开页面并补录页面文档：`{url}` → `{ok, item, total}`；插件会话没有标签页，返回 400 |
 | POST | `/api/collect/captures/{id}/stop` | 停止录制 → `{count, items[]}` |
 | POST | `/api/collect/captures/{id}/analyze` | 分析某条请求：`{request_id}` → `{records_path, records, fields[], columns[], rows[], pagination, pagination_text}` |
 | DELETE | `/api/collect/captures/{id}` | 关闭标签页并丢弃这次录制结果 |
@@ -478,8 +480,9 @@ POST /api/collect/tasks
 
 **插件录接口**：
 
-1. `POST /api/collect/captures` `{source:"extension", start_url}` 拿 `capture_id`；
+1. `POST /api/collect/captures` `{source:"extension", start_url, types:["XHR","Fetch","Document"]}` 拿 `capture_id`；
 2. 页面钩子抓到的请求攒批 `POST /api/collect/captures/{id}/requests`（每 500ms 或满 20 条）；
+   `type:"Document"` 的条目由 content script 在开始录制 / 页面地址变化时上报（`document.documentElement.outerHTML`，≤256KB）；
 3. 停止：`POST /api/collect/captures/{id}/stop`，然后打开 `#/collect/capture/{id}` 勾选建任务。
 
 **服务端执行**：`POST /api/runs` → 生成数据 → 启动/复用内置浏览器 → 逐步执行（变量替换 + 多级定位 + 自愈）→
